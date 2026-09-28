@@ -665,6 +665,57 @@ describe("Phase 4 — Codex PR #41 round 5 P1: desktop_discover.windows[] is imp
     expect(out.windows).toHaveLength(0);
   });
 
+  it("DesktopFacade.see() reports an hwnd target's own title, not the hwnd (internal #211 item 5)", async () => {
+    const { DesktopFacade } = await import("../../src/tools/desktop.js");
+    const notepad = {
+      zOrder: 0,
+      title: "Notepad",
+      hwnd: "12345",
+      region: { x: 0, y: 0, width: 800, height: 600 },
+      isActive: true,
+      isMinimized: false,
+      isMaximized: false,
+      processName: "notepad.exe",
+    };
+    const facade = new DesktopFacade(() => [], { windowsProvider: () => [notepad] });
+    expect((await facade.see({ target: { hwnd: "12345" } })).target.title).toBe("Notepad");
+    // A window the list does not hold still reports the hwnd, as before
+    expect((await facade.see({ target: { hwnd: "99999" } })).target.title).toBe("99999");
+    // Other spellings of the same hwnd, and an hwnd that does not parse
+    expect((await facade.see({ target: { hwnd: "0x3039" } })).target.title).toBe("Notepad");
+    expect((await facade.see({ target: { hwnd: " 12345" } })).target.title).toBe("Notepad");
+    expect((await facade.see({ target: { hwnd: "not-a-handle" } })).target.title).toBe("not-a-handle");
+    // An unusable handle gives way to windowTitle, as the read does (parseTargetHwnd)
+    expect((await facade.see({ target: { hwnd: "0", windowTitle: "Notepad" } })).target.title).toBe("Notepad");
+    expect((await facade.see({ target: { hwnd: "x", windowTitle: "Notepad" } })).target.title).toBe("Notepad");
+    // The title the candidates were read with (the ingress's resolved target, e.g. a cache hit)
+    // beats this reply's later window listing
+    const resolvedTarget = { hwnd: "12345", windowTitle: "Earlier title" };
+    const ingress = {
+      getSnapshot: async () => ({ candidates: [], warnings: [], target: resolvedTarget }),
+      invalidate: () => {},
+      subscribe: () => () => {},
+      dispose: () => {},
+    };
+    const cached = new DesktopFacade(() => [], { windowsProvider: () => [notepad], ingress });
+    expect((await cached.see({ target: { hwnd: "12345" } })).target.title).toBe("Earlier title");
+    // ... only when the caller sent the handle alone: with a windowTitle too, the ingress hands the
+    // caller's target back, so its title is the caller's text, not a resolved one
+    expect((await cached.see({ target: { hwnd: "12345", windowTitle: "stale" } })).target.title).toBe("Notepad");
+    // ... only when it names the same handle
+    resolvedTarget.hwnd = "777";
+    expect((await cached.see({ target: { hwnd: "12345" } })).target.title).toBe("Notepad");
+    // hwnd wins over windowTitle, as the target is resolved
+    expect((await facade.see({ target: { hwnd: "12345", windowTitle: "メモ" } })).target.title).toBe("Notepad");
+    // An empty title is not a title
+    const untitled = new DesktopFacade(() => [], { windowsProvider: () => [{ ...notepad, title: "" }] });
+    expect((await untitled.see({ target: { hwnd: "12345" } })).target.title).toBe("12345");
+    // windowTitle and tabId targets are unchanged
+    expect((await facade.see({ target: { windowTitle: "メモ帳" } })).target.title).toBe("メモ帳");
+    expect((await facade.see({ target: { tabId: "tab-1" } })).target.title).toBe("tab-1");
+    expect((await facade.see({})).target.title).toBe("(current)");
+  });
+
   it("DesktopFacade.see() degrades to empty windows[] when windowsProvider throws", async () => {
     const { DesktopFacade } = await import("../../src/tools/desktop.js");
     const facade = new DesktopFacade(() => [], {

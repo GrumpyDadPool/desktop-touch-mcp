@@ -407,9 +407,46 @@ function primaryActionFrom(entity: UiEntity): string {
   return entity.affordances[0]?.verb ?? "read";
 }
 
-function targetTitle(target?: TargetSpec): string {
+/**
+ * The `target.title` the reply carries. An hwnd target reports the window's own title; it used to
+ * report the hwnd itself, so a caller that addressed by hwnd got a number where the field says
+ * title (internal #211 item 5). Whether the hwnd counts is `parseTargetHwnd`'s answer, the one the
+ * providers use: a usable handle comes first (compared as a number, so `0x…` names the same
+ * window), and an unusable one (`"0"`, text) gives way to `windowTitle`, as the read did.
+ *
+ * The title is the one the candidates were read with: the ingress resolves a handle alone to a
+ * handle and a title (`ProviderResult.target`), and a cache hit hands back that target, so the
+ * title matches the entities and the lease even if the window has since retitled. When the caller sent a
+ * title with the handle, or the ingress said nothing (a direct provider), the title comes from this
+ * reply's `windows` list,
+ * and a window that list does not hold still reports the hwnd, as before. A windowTitle target
+ * reports what the caller passed.
+ */
+function targetTitle(
+  target: TargetSpec | undefined,
+  windows: readonly DesktopWindowMeta[],
+  resolved: TargetSpec | undefined,
+): string {
   if (!target) return "(current)";
+  const pinned = parseTargetHwnd(target);
+  if (pinned !== undefined) {
+    // Only a title the ingress resolved counts: when the caller sent a windowTitle along with the
+    // handle, the ingress hands that target back unchanged, and its title is the caller's text.
+    if (target.windowTitle === undefined && resolved?.windowTitle && parseTargetHwnd(resolved) === pinned) {
+      return resolved.windowTitle;
+    }
+    const title = windows.find((w) => parseHwnd(w.hwnd) === pinned)?.title;
+    return title ? title : target.hwnd!;
+  }
   return target.windowTitle ?? target.hwnd ?? target.tabId ?? "(current)";
+}
+
+function parseHwnd(hwnd: string): bigint | undefined {
+  try {
+    return BigInt(hwnd);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -734,7 +771,7 @@ export class DesktopFacade {
 
     const output: DesktopSeeOutput = {
       viewId: newViewId,
-      target: { title: targetTitle(input.target), generation: session.generation },
+      target: { title: targetTitle(input.target, windows, rawResult.target), generation: session.generation },
       entities: entityViews,
       windows,
       softExpiresAtMs: computeSoftExpiresAtMs(issuedAtMs, policyTtl.ttlMs),

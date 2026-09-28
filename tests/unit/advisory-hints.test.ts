@@ -44,11 +44,22 @@ describe("maybeAdvisory — keyboard(type) → desktop_act", () => {
     expect(hint).not.toBeNull();
   });
 
-  it("falls back to focused:true when no windowTitle, and text:'…' when no text", () => {
+  it("omits the target when there is no windowTitle or hwnd, and text:'…' when no text", () => {
     const hint = maybeAdvisory("keyboard", { action: "type" }, edit(), NATIVE);
     expect(hint).not.toBeNull();
-    expect(hint!.example).toContain("focused:true");
+    // desktop_discover's target takes windowTitle / hwnd / tabId only (internal #211 item 4)
+    expect(hint!.example).toContain("desktop_discover({})");
+    expect(hint!.example).not.toContain("focused");
     expect(hint!.example).toContain("text:'…'");
+  });
+
+  it("uses the hwnd the caller addressed, ahead of windowTitle as keyboard does", () => {
+    const hint = maybeAdvisory("keyboard", { action: "type", hwnd: "723210" }, edit(), NATIVE);
+    expect(hint).not.toBeNull();
+    expect(hint!.example).toContain("desktop_discover({target:{hwnd:'723210'}})");
+    const both = maybeAdvisory("keyboard", { action: "type", windowTitle: "メモ", hwnd: "723210" }, edit(), NATIVE);
+    expect(both!.example).toContain("desktop_discover({target:{hwnd:'723210'}})");
+    expect(both!.example).not.toContain("windowTitle");
   });
 
   it("truncates long text and sanitises quotes/newlines/backslashes in the example", () => {

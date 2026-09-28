@@ -158,3 +158,103 @@ describe("expansion swimlane 1 (workspace_launch): trunk completion contract —
     expect(result.content).toBeDefined();
   });
 });
+
+// ── internal #211 item 6: the reply carries the window the description promises ──
+describe("workspace_launch reply: windowTitle / hwnd / pid (internal #211 item 6)", () => {
+  it("reports the found window's title, hwnd as a string, pid and region, and keeps foundWindow", async () => {
+    const { buildLaunchResult } = await import("../../src/tools/workspace.js");
+    const region = { x: 1, y: 2, width: 300, height: 200 };
+    const r = buildLaunchResult("notepad.exe", [], { title: "無題 - メモ帳", hwnd: 723210n, region }, (h) => (h === 723210n ? 4242 : 0));
+    expect(r).toEqual({
+      launched: "notepad.exe",
+      args: [],
+      windowTitle: "無題 - メモ帳",
+      hwnd: "723210",
+      pid: 4242,
+      region,
+      foundWindow: "無題 - メモ帳",
+    });
+  });
+
+  it("reports null window fields when no window was found, without asking for a pid", async () => {
+    const { buildLaunchResult } = await import("../../src/tools/workspace.js");
+    let asked = false;
+    const r = buildLaunchResult("calc.exe", ["/x"], null, () => { asked = true; return 1; });
+    expect(r).toEqual({ launched: "calc.exe", args: ["/x"], windowTitle: null, hwnd: null, pid: null, region: null, foundWindow: null });
+    expect(asked).toBe(false);
+  });
+
+  it("reports pid null when the owning process cannot be read", async () => {
+    const { buildLaunchResult } = await import("../../src/tools/workspace.js");
+    const r = buildLaunchResult("x.exe", [], { title: "t", hwnd: 1n, region: { x: 0, y: 0, width: 60, height: 60 } }, () => 0);
+    expect(r.pid).toBeNull();
+    expect(r.hwnd).toBe("1");
+  });
+
+  const win = (hwnd: bigint, title: string, extra: Record<string, unknown> = {}) => ({
+    hwnd, title, region: { x: 0, y: 0, width: 400, height: 300 }, zOrder: 0,
+    isMinimized: false, isMaximized: false, isActive: false, ...extra,
+  });
+  const before = new Set([1n, 2n]);
+  const titles = new Set(["Old", "Chrome - a"]);
+
+  it("pickLaunchedWindows separates a new window from a retitled one and carries the hwnd", async () => {
+    const { pickLaunchedWindows } = await import("../../src/tools/workspace.js");
+    expect(pickLaunchedWindows([win(1n, "Old"), win(7n, "New")], before, titles)).toEqual({
+      created: { title: "New", hwnd: 7n, region: { x: 0, y: 0, width: 400, height: 300 } },
+      retitled: null,
+    });
+    const both = pickLaunchedWindows([win(2n, "Chrome - b"), win(7n, "New")], before, titles);
+    expect(both.created?.hwnd).toBe(7n);
+    expect(both.retitled?.hwnd).toBe(2n);
+    // Skipped: untitled, minimized, too small, unchanged
+    expect(pickLaunchedWindows([
+      win(8n, ""),
+      win(9n, "Min", { isMinimized: true }),
+      win(10n, "Tiny", { region: { x: 0, y: 0, width: 49, height: 300 } }),
+      win(1n, "Old"),
+    ], before, titles)).toEqual({ created: null, retitled: null });
+  });
+
+  it("waitForLaunchedWindow keeps waiting past a retitle for the new window", async () => {
+    const { waitForLaunchedWindow } = await import("../../src/tools/workspace.js");
+    // Listing 1: only the already-open window retitled. Listing 2: the new window appears.
+    const listings = [[win(2n, "Chrome - b")], [win(2n, "Chrome - b"), win(7n, "New")]];
+    let n = 0;
+    const found = await waitForLaunchedWindow(() => listings[Math.min(n++, listings.length - 1)]!, before, titles, 1000, 5);
+    expect(found?.hwnd).toBe(7n);
+  });
+
+  it("waitForLaunchedWindow reports the retitled window only when no new window appeared", async () => {
+    const { waitForLaunchedWindow } = await import("../../src/tools/workspace.js");
+    const found = await waitForLaunchedWindow(() => [win(2n, "Chrome - b")], before, titles, 30, 5);
+    expect(found?.hwnd).toBe(2n);
+    expect(await waitForLaunchedWindow(() => [win(1n, "Old")], before, titles, 30, 5)).toBeNull();
+    // A retitled window that closed, or took its old title back, by the last listing is not reported
+    let k = 0;
+    expect(await waitForLaunchedWindow(() => (k++ === 0 ? [win(2n, "Chrome - b")] : [win(2n, "Chrome - a")]), before, titles, 30, 5)).toBeNull();
+    let m = 0;
+    expect(await waitForLaunchedWindow(() => (m++ === 0 ? [win(2n, "Chrome - b")] : []), before, titles, 30, 5)).toBeNull();
+    // A listing that throws is retried, not fatal
+    let calls = 0;
+    const afterThrow = await waitForLaunchedWindow(() => {
+      if (calls++ === 0) throw new Error("enum failed");
+      return [win(7n, "New")];
+    }, before, titles, 1000, 5);
+    expect(afterThrow?.hwnd).toBe(7n);
+  });
+
+  it("the description names the fields the reply carries and the parameter the schema takes", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../src/tools/workspace.ts", import.meta.url), "utf-8");
+    const start = src.search(/server\.tool\(\s*"workspace_launch",/);
+    expect(start).toBeGreaterThan(-1);
+    const desc = src.slice(start, src.indexOf("workspaceLaunchRegistrationSchema,", start));
+    expect(desc).toContain("buildDesc({");
+    expect(desc).toContain("{launched, args, windowTitle, hwnd, pid, region, foundWindow}");
+    expect(desc).toContain("with the window fields null");
+    expect(desc).toContain("answers after the whole waitMs");
+    expect(desc).toContain("waitMs");
+    expect(desc).not.toMatch(/timeoutMs|detach|elapsedMs|ShellExecute/);
+  });
+});

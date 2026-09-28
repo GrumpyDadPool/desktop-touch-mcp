@@ -129,11 +129,18 @@ function buildHint(
   if (focusedElement.automationId === WEB_AREA_AUTOMATION_ID) return null;
 
   const windowTitle = typeof args["windowTitle"] === "string" ? (args["windowTitle"] as string) : undefined;
+  const hwnd = typeof args["hwnd"] === "string" || typeof args["hwnd"] === "number" ? String(args["hwnd"]) : undefined;
   const text = typeof args["text"] === "string" ? (args["text"] as string) : undefined;
 
-  const discoverArg = windowTitle
-    ? `{target:{windowTitle:'${sanitize(windowTitle)}'}}`
-    : `{target:{focused:true}}`;
+  // The target keys are the ones desktop_discover's schema takes (windowTitle / hwnd / tabId);
+  // an unknown key is dropped silently and the call reads the foreground window. hwnd comes first,
+  // as it does in keyboard's own targeting, so the example names the window keyboard addressed.
+  // With neither given, the example omits the target, which reads the foreground window on purpose.
+  const discoverArg = hwnd
+    ? `{target:{hwnd:'${sanitize(hwnd)}'}}`
+    : windowTitle
+      ? `{target:{windowTitle:'${sanitize(windowTitle)}'}}`
+      : `{}`;
   const actArg =
     text !== undefined
       ? `{lease, action:'type', text:'${sanitize(truncate(text))}'}`
