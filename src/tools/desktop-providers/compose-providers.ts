@@ -27,6 +27,7 @@
  */
 
 import { parseTargetHwnd, type TargetSpec } from "../../engine/world-graph/session-registry.js";
+import { WEB_AREA_AUTOMATION_ID } from "../_advisory.js";
 import type { ProviderResult } from "../../engine/world-graph/candidate-ingress.js";
 import { fetchUiaCandidates }      from "./uia-provider.js";
 import { fetchBrowserCandidates }  from "./browser-provider.js";
@@ -36,7 +37,7 @@ import { fetchOcrCandidates }      from "./ocr-provider.js";
 import { resolveWindowTarget }     from "../_resolve-window.js";
 import { WindowExcludedError }     from "../../engine/tool-exclusion.js";
 import { probeAim, probeLane, type ProbeLane } from "../../engine/aim-probe.js";
-import { toAim, readWindowIdentityFields, type WindowIdentity, type WindowRect, type AimOrigin } from "../../engine/aim.js";
+import { containsPoint, toAim, readWindowIdentityFields, type WindowIdentity, type WindowRect, type AimOrigin } from "../../engine/aim.js";
 import { getWindowIdentity, getWindowClassName, getWindowTitleW, getWindowRectByHwnd, windowIsAlive } from "../../engine/win32.js";
 
 // ── G4: transient visual warnings trigger a single 200ms retry ────────────────
@@ -208,6 +209,48 @@ function handleIsGone(hwnd: string): boolean {
  * The provider still reports it, because the composer needs to see it to make this decision; what
  * changes is that the caller is not told about a lane whose silence cost them nothing.
  */
+/**
+ * internal #211 — for a window holding a web page, the page first: UIA controls on the page, then
+ * OCR text on the page when OCR ran (a window that also read as blind), then everything else (the
+ * browser's own tabs, address bar and toolbar), each group in read order. discover keeps the first
+ * `maxEntities` in this order; in read order the browser's chrome filled them (gate 2; win2 measured
+ * page-first on #746: Wikipedia 49 of 50 page entries, NHK chrome from 31st, against 2nd on main).
+ *
+ * "On the page" is the element's centre inside the page's rectangle, so a control half scrolled out
+ * of view still counts. Text that repeats a control on the page — the same label, its centre inside
+ * that control — is dropped, whether OCR read it or the visual lane replays it: the UIA entity is
+ * the one pressed by pattern, and two copies spent the cap twice.
+ */
+export function pageFirst(
+  candidates: ProviderResult["candidates"],
+  page: { x: number; y: number; width: number; height: number },
+): ProviderResult["candidates"] {
+  type C = ProviderResult["candidates"][number];
+  const centreIn = (r: C["rect"], box: { x: number; y: number; width: number; height: number }): boolean =>
+    r !== undefined && containsPoint(box, r.x + r.width / 2, r.y + r.height / 2);
+  const norm = (s: string | undefined): string => (s ?? "").trim().toLowerCase();
+  const isPageControl = (c: C): boolean =>
+    c.source === "uia" && c.locator?.uia?.automationId !== WEB_AREA_AUTOMATION_ID && centreIn(c.rect, page);
+  // Text only repeats a CONTROL on the page — not the page element (its name is the page's title)
+  // nor the browser's own chrome (gate 2 on A2). The visual lane's replays of OCR are repeats too:
+  // the OCR lane hands everything it read to the visual backend, so a dropped copy came back on the
+  // next discover as `visual_gpu`.
+  const controls = candidates.filter(isPageControl);
+  const repeatsControl = (c: C): boolean =>
+    (c.source === "ocr" || c.source === "visual_gpu") &&
+    controls.some((u) => u.rect !== undefined && norm(u.label) === norm(c.label) && centreIn(c.rect, u.rect));
+  const onPage: C[] = [];
+  const readOnPage: C[] = [];
+  const rest: C[] = [];
+  for (const c of candidates) {
+    if (repeatsControl(c)) continue;
+    if (isPageControl(c)) onPage.push(c);
+    else if (c.source === "ocr" && centreIn(c.rect, page)) readOnPage.push(c);
+    else rest.push(c);
+  }
+  return [...onPage, ...readOnPage, ...rest];
+}
+
 function withoutUnneededBlindNotice(result: ProviderResult, visualWasNeeded: boolean): ProviderResult {
   if (visualWasNeeded) return result;
   if (!result.warnings.includes("visual_backend_cannot_recognise")) return result;
@@ -522,6 +565,12 @@ async function composeCandidatesInner(target: TargetSpec): Promise<ProviderResul
   // OCR lane: additive, UIA-blind targets only.
   // Builds a label dictionary from UIA candidates for snap-correction inside runSomPipeline.
   const uiaBlindForOcr = uiaResult.warnings.some((w) => UIA_BLIND_WARNINGS.has(w));
+  // internal #211 — the page a UIA read found (Chrome/Edge/Electron). It orders the reply; it does
+  // NOT start OCR. OCR is the lane for a window UIA cannot see: on a page UIA reads, it cost
+  // 340–435 ms per discover while almost none of it reached the first 50 entities (win2, #746). A
+  // caller that finds the page's text missing switches tools itself (screenshot, detail 'ocr') —
+  // the user's call, 2026-09-29.
+  const webArea = uiaResult.webArea;
   const ocrResult: ProviderResult = uiaBlindForOcr
     ? await fetchOcrCandidates(
         target,
@@ -533,7 +582,8 @@ async function composeCandidatesInner(target: TargetSpec): Promise<ProviderResul
     // without a row it prints like a lane nobody instrumented (item 14a).
     : probeLane("ocr", "skipped", { why: "uia_not_blind" }, { candidates: [], warnings: [] });
 
-  const merged     = withoutUnneededBlindNotice(mergeResults([uiaResult, visualResult, ocrResult]), uiaBlindForOcr);
+  const mergedAll  = withoutUnneededBlindNotice(mergeResults([uiaResult, visualResult, ocrResult]), uiaBlindForOcr);
+  const merged     = webArea !== undefined ? { ...mergedAll, candidates: pageFirst(mergedAll.candidates, webArea) } : mergedAll;
   const escalation = applyVisualEscalation(uiaResult, visualResult, "uia");
   const extra      = escalation.filter((w) => !merged.warnings.includes(w));
   const finalMerged = extra.length > 0

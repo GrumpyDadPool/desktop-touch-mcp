@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **In a window holding a web page, `desktop_discover` lists the page first.** Browsers and
+  Electron apps now expose their pages to the deeper UIA read. In read order, though, the browser's
+  own tabs, address bar and toolbar came first and filled the first entities returned (20 by default). When the read
+  finds a page, the page's controls are listed first and everything else after them. A page counts
+  only when web content covers at least half the window (a page and a docked DevTools count
+  together, and where they overlap it counts once), so a small web pane inside a native app does
+  not reorder that app. OCR is not run for a page that UIA reads. If a page's text is not in the
+  reply, use `screenshot` with `detail: "ocr"`.
+
 - **`desktop_discover` says why a `query` found nothing.** A `query` that matched none of the
   controls read used to return an empty list and nothing else. The list was the same when the text
   was scrolled out of view, when it was text UI Automation does not expose (a spreadsheet cell's

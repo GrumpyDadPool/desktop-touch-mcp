@@ -21,13 +21,13 @@ type El = { name: string; controlType: string; isEnabled: boolean; boundingRect:
 const pane = (depth: number): El => ({ name: "Chrome Legacy Window", controlType: "Pane", isEnabled: true, boundingRect: { x: 0, y: 0, width: 900, height: 600 }, patterns: [], depth });
 const button = (name: string, depth: number): El => ({ name, automationId: name, controlType: "Button", isEnabled: true, boundingRect: { x: 10, y: 10, width: 60, height: 20 }, patterns: ["Invoke"], depth });
 
-async function read(opts: { tree: El[]; truncated?: boolean; via?: "native" | "powershell" }) {
+async function read(opts: { tree: El[]; truncated?: boolean; via?: "native" | "powershell"; windowRect?: { x: number; y: number; width: number; height: number } | null; windowTitle?: string }) {
   vi.resetModules();
   const getUiElements = vi.fn(async (_title: string, maxDepth: number, maxElements: number, _t: number, _o?: unknown) => {
     const elements = opts.tree.filter((e) => e.depth <= maxDepth).slice(0, maxElements);
     return {
-      windowTitle: "FX-HTML - Google Chrome",
-      windowRect: { x: 0, y: 0, width: 900, height: 600 },
+      windowTitle: opts.windowTitle ?? "FX-HTML - Google Chrome",
+      windowRect: opts.windowRect === undefined ? { x: 0, y: 0, width: 900, height: 600 } : opts.windowRect,
       elementCount: elements.length,
       elements,
       ...(opts.truncated !== undefined && { truncated: opts.truncated }),
@@ -83,8 +83,144 @@ describe("discover's UIA read", () => {
     expect(result.warnings).not.toContain("uia_tree_truncated");
   });
 
-  it("measures a PowerShell read against the PowerShell road's 80, not 500", async () => {
-    const { result } = await read({ tree: Array.from({ length: 80 }, (_, i) => button(`b${i}`, 2)), via: "powershell" });
-    expect(result.warnings).toContain("uia_tree_truncated");
+  it("does not call a PowerShell read truncated at its 80 — that road stops there silently, as before", async () => {
+    // A blind canvas app read on the PowerShell road was judged blind and got OCR; truncated would
+    // have skipped both (gate 2 on A2).
+    const { result } = await read({ tree: [pane(1), ...Array.from({ length: 79 }, (_, i) => ({ ...pane(2), name: `p${i}`, controlType: "Text" }))], via: "powershell" });
+    expect(result.warnings).not.toContain("uia_tree_truncated");
+  });
+
+  it("reports the page's rectangle from every element read, named or not (a page with no <title>)", async () => {
+    const nameless = { ...pane(7), name: "", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 0, y: 100, width: 900, height: 500 } };
+    const { result } = await read({ tree: [pane(4), nameless, button("inc", 8)] });
+    expect(result.webArea).toEqual({ x: 0, y: 100, width: 900, height: 500 });
+  });
+
+  it("reports the largest page when there are several and the title names neither", async () => {
+    // Window 900 x 600; both cover at least half of it.
+    const small = { ...pane(7), name: "Frame A", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 0, y: 100, width: 900, height: 320 } };
+    const large = { ...pane(7), name: "Frame B", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 0, y: 100, width: 900, height: 450 } };
+    const { result } = await read({ tree: [small, large] });
+    expect(result.webArea).toEqual(large.boundingRect);
+  });
+
+  it("reports no page for a window without one", async () => {
+    const { result } = await read({ tree: [button("OK", 1)] });
+    expect(result.webArea).toBeUndefined();
+  });
+
+  it("reports no page for a small web pane in a native app (under half the window)", async () => {
+    const pane300 = { ...pane(3), name: "Help", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 0, y: 0, width: 300, height: 150 } };
+    const { result } = await read({ tree: [button("OK", 1), pane300] });
+    expect(result.webArea).toBeUndefined();
+  });
+
+  it("prefers the page the window's title names over a larger DevTools", async () => {
+    // The window is 900 x 600; both web areas cover at least half of it, and DevTools is the larger.
+    const bigDev = { ...pane(7), name: "DevTools", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 0, y: 100, width: 900, height: 400 } };
+    const bigPage = { ...pane(7), name: "FX-HTML", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 0, y: 100, width: 900, height: 320 } };
+    const { result } = await read({ tree: [bigDev, bigPage] });
+    expect(result.webArea).toEqual(bigPage.boundingRect);
+  });
+
+  // PR codex P2 on d27f94bd: docked DevTools sits BESIDE the page, splitting the content area under
+  // the toolbar. Window 900 x 600, content 900 x 500 from y = 100.
+  const web = (name: string, x: number, width: number): El => ({ ...pane(7), name, controlType: "Document", automationId: "RootWebArea", boundingRect: { x, y: 100, width, height: 500 } });
+
+  it("finds the page beside DevTools docked half and half, though neither half is half the window", async () => {
+    const page = web("FX-HTML", 0, 450);
+    const { result } = await read({ tree: [page, web("DevTools", 450, 450)] });
+    expect(result.webArea).toEqual(page.boundingRect);
+  });
+
+  it("finds the page by its title beside a DevTools that alone is over half the window", async () => {
+    const page = web("FX-HTML", 0, 300);
+    const { result } = await read({ tree: [web("DevTools", 300, 600), page] });
+    expect(result.webArea).toEqual(page.boundingRect);
+  });
+
+  it("reports no page for two small web panes that together are under half the window", async () => {
+    const { result } = await read({ tree: [button("OK", 1), web("Help", 0, 200), web("Tips", 600, 200)] });
+    expect(result.webArea).toBeUndefined();
+  });
+
+  it("finds the page in the geometry win2 measured: DevTools' root spans the content, the page's is its visible part", async () => {
+    // Chrome 1400 x 900 at (40, 40), DevTools docked right (win2, 2026-09-29, head bff8c354).
+    const devtools: El = { ...pane(7), name: "DevTools", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 48, y: 127, width: 1384, height: 805 } };
+    const page: El = { ...devtools, name: "FX-HTML", boundingRect: { x: 48, y: 127, width: 829, height: 805 } };
+    const { result } = await read({ tree: [devtools, page], windowRect: { x: 40, y: 40, width: 1400, height: 900 } });
+    expect(result.webArea).toEqual(page.boundingRect);
+  });
+
+  it("finds a page with no <title> under DevTools, not DevTools, the larger root (PR codex P2)", async () => {
+    const devtools: El = { ...pane(7), name: "DevTools", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 48, y: 127, width: 1384, height: 805 } };
+    const page: El = { ...devtools, name: "", boundingRect: { x: 48, y: 127, width: 829, height: 805 } };
+    const { result } = await read({ tree: [devtools, page], windowRect: { x: 40, y: 40, width: 1400, height: 900 } });
+    expect(result.webArea).toEqual(page.boundingRect);
+  });
+
+  it("prefers the root the window's title names over a larger one that is not DevTools", async () => {
+    const other: El = { ...web("Frame B", 0, 900) };
+    const page: El = { ...web("FX-HTML", 0, 600) };
+    const { result } = await read({ tree: [other, page] });
+    expect(result.webArea).toEqual(page.boundingRect);
+  });
+
+  it("finds a page titled about DevTools, not DevTools, though the title names both (PR codex P2)", async () => {
+    const devtools: El = { ...pane(7), name: "DevTools", controlType: "Document", automationId: "RootWebArea", boundingRect: { x: 48, y: 127, width: 1384, height: 805 } };
+    const page: El = { ...devtools, name: "Chrome DevTools", boundingRect: { x: 48, y: 127, width: 829, height: 805 } };
+    const { result } = await read({ tree: [devtools, page], windowRect: { x: 40, y: 40, width: 1400, height: 900 }, windowTitle: "Chrome DevTools - Google Chrome" });
+    expect(result.webArea).toEqual(page.boundingRect);
+  });
+
+  it("still reports DevTools' root when it is the only one (DevTools undocked into its own window)", async () => {
+    const devtools: El = { ...web("DevTools", 0, 900) };
+    const { result } = await read({ tree: [devtools] });
+    expect(result.webArea).toEqual(devtools.boundingRect);
+  });
+
+  it.each([
+    ["zero width", { x: 0, y: 0, width: 0, height: 600 }],
+    ["negative height", { x: 0, y: 0, width: 900, height: -600 }],
+  ])("reports no page when the window's bounds are %s (PR codex P2)", async (_name, windowRect) => {
+    const { result } = await read({ tree: [web("FX-HTML", 0, 900)], windowRect });
+    expect(result.webArea).toBeUndefined();
+  });
+
+  it("does not count twice what two overlapping roots share: two over the same 30% are 30% (PR codex P2)", async () => {
+    const a: El = { ...web("Help", 0, 324), boundingRect: { x: 0, y: 100, width: 324, height: 500 } };
+    const { result } = await read({ tree: [button("OK", 1), a, { ...a, name: "Help 2" }] });
+    expect(result.webArea).toBeUndefined();
+  });
+
+  it("counts only the part of a root inside the window", async () => {
+    const { result } = await read({ tree: [button("OK", 1), { ...web("Wide", -1200, 1500) }] });
+    expect(result.webArea).toBeUndefined();
+  });
+
+  it("reports no page when the window's bounds were not read: half of it cannot be told (PR codex P2)", async () => {
+    const { result } = await read({ tree: [web("FX-HTML", 0, 900)], windowRect: null });
+    expect(result.webArea).toBeUndefined();
+  });
+});
+
+describe("coveredArea", () => {
+  const clip = { x: 0, y: 0, width: 100, height: 100 };
+  const r = (x: number, y: number, width: number, height: number) => ({ x, y, width, height });
+  it.each([
+    ["one rect", [r(0, 0, 10, 10)], 100],
+    ["disjoint rects add", [r(0, 0, 10, 10), r(50, 50, 10, 10)], 200],
+    ["a nested rect adds nothing", [r(0, 0, 50, 50), r(10, 10, 5, 5)], 2500],
+    ["a partial overlap counts once", [r(0, 0, 20, 10), r(10, 0, 20, 10)], 300],
+    ["side by side counts both", [r(0, 0, 50, 100), r(50, 0, 50, 100)], 10000],
+    ["the part left of the clip does not count", [r(-50, 0, 100, 10)], 500],
+    ["the part right of the clip does not count", [r(50, 0, 100, 10)], 500],
+    ["the part above the clip does not count", [r(0, -50, 10, 100)], 500],
+    ["the part below the clip does not count", [r(0, 50, 10, 100)], 500],
+    ["a rect wholly outside counts nothing", [r(200, 200, 10, 10)], 0],
+    ["stacked rows with a gap", [r(0, 0, 10, 10), r(0, 20, 10, 10), r(0, 5, 10, 10)], 250],
+  ])("%s", async (_name, rects, expected) => {
+    const { coveredArea } = await import("../../src/tools/desktop-providers/uia-provider.js");
+    expect(coveredArea(rects, clip)).toBe(expected);
   });
 });

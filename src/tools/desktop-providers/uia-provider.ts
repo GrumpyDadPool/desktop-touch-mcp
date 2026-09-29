@@ -17,6 +17,8 @@ import { probeLane } from "../../engine/aim-probe.js";
 import { parseTargetHwnd, type TargetSpec } from "../../engine/world-graph/session-registry.js";
 import type { ProviderResult } from "../../engine/world-graph/candidate-ingress.js";
 import { UIA_PRESS_ONLY_CONTROL_TYPES } from "../../engine/world-graph/guarded-touch.js";
+import { WEB_AREA_AUTOMATION_ID } from "../_advisory.js";
+import type { UiElement } from "../../engine/uia-bridge.js";
 
 function uiaRoleFromControlType(ct: string): string {
   const map: Record<string, string> = {
@@ -121,10 +123,11 @@ export async function fetchUiaCandidates(
       fallbackLimits: { maxDepth: UIA_DISCOVER_FALLBACK_DEPTH, maxElements: UIA_DISCOVER_FALLBACK_ELEMENTS },
     });
     // A read that filled its cap may have stopped early; it is published as a prefix, not judged
-    // for blindness as the window. Which cap it ran with depends on the road that answered. The
-    // PowerShell script's own flag covers only its deadline.
-    const cap = raw.via === "powershell" ? UIA_DISCOVER_FALLBACK_ELEMENTS : UIA_DISCOVER_MAX_ELEMENTS;
-    const result  = !raw.truncated && raw.elementCount >= cap ? { ...raw, truncated: true } : raw;
+    // for blindness as the window.
+    // Against the native cap only: the PowerShell road stops at its 80 without saying so, as it
+    // always did, and a blind canvas app read there must still be judged blind and get OCR (gate 2
+    // on A2). A PowerShell read never reaches 500.
+    const result  = !raw.truncated && raw.elementCount >= UIA_DISCOVER_MAX_ELEMENTS ? { ...raw, truncated: true } : raw;
 
     // ADR-036 probe — what this lane actually asked for, and what it stamps on every candidate.
     // `scoped:false` with a `targetId` that looks like a handle is the read describing one window
@@ -223,10 +226,63 @@ export async function fetchUiaCandidates(
       else if (blind.reason === "too-few-elements") warnings.push("uia_blind_too_few_elements");
     }
 
-    return probeLane("uia", "read", read, { candidates, warnings });
+    // internal #211 — the page, from the whole read and not the named candidates: a page with no
+    // <title> has a nameless root, which the filter above drops. Only web content that is most of
+    // the window counts — a small WebView2 pane in a native app is not what the window is (gate 2
+    // on A2) — and without the window's bounds that cannot be told, so there is no page (PR codex
+    // P2). The half is of the area the roots cover together, inside the window: either root alone
+    // can fall under it beside a docked DevTools, and two overlapping roots must not count their
+    // shared part twice (PR codex P2 ×2). DevTools' root is never the page while another root is
+    // there: it spans the whole content area wherever it is docked, so it would win "the largest"
+    // for a page with no <title>, and "the one the title names" for a page titled about DevTools
+    // (win2 measured the root's name "DevTools", Chrome, 2026-09-29; PR codex P2 ×2). Of the rest,
+    // the one the window's title names — a browser titles itself after the page — and otherwise
+    // the largest. DevTools undocked into its own window is the only root there, and counts.
+    const window = result.windowRect;
+    const area = (el: UiElement) => el.boundingRect!.width * el.boundingRect!.height;
+    const roots = result.elements
+      .filter((el) => el.automationId === WEB_AREA_AUTOMATION_ID && el.boundingRect && el.boundingRect.width > 0 && el.boundingRect.height > 0)
+      .sort((a, b) => area(b) - area(a));
+    const pages = roots.some((el) => el.name !== DEVTOOLS_ROOT_NAME) ? roots.filter((el) => el.name !== DEVTOOLS_ROOT_NAME) : roots;
+    const isMostOfWindow = !!window && window.width > 0 && window.height > 0 && coveredArea(roots.map((el) => el.boundingRect!), window) >= 0.5 * window.width * window.height;
+    const title = result.windowTitle ?? "";
+    const webArea = isMostOfWindow
+      ? (pages.find((el) => el.name && title.includes(el.name)) ?? pages[0])?.boundingRect ?? undefined
+      : undefined;
+
+    return probeLane("uia", "read", read, { candidates, warnings, ...(webArea && { webArea }) });
   } catch (err) {
     console.error(`[uia-provider] Error for target "${targetId}":`, err);
     // What was read, when the throw came after the read; what was asked, when it came before.
     return probeLane("uia", "failed", { ...(read ?? asked), why: "threw" }, { candidates: [], warnings: [...hwndWarnings, "uia_provider_failed"] });
   }
+}
+
+/** The name Chrome and Edge give DevTools' own RootWebArea (measured, win2, 2026-09-29). */
+const DEVTOOLS_ROOT_NAME = "DevTools";
+
+type Rect = { x: number; y: number; width: number; height: number };
+
+/** The area the rectangles cover together inside `clip`, each point counted once. */
+export function coveredArea(rects: Rect[], clip: Rect): number {
+  const clipped = rects
+    .map((r) => ({
+      x0: Math.max(r.x, clip.x), y0: Math.max(r.y, clip.y),
+      x1: Math.min(r.x + r.width, clip.x + clip.width), y1: Math.min(r.y + r.height, clip.y + clip.height),
+    }))
+    .filter((r) => r.x1 > r.x0 && r.y1 > r.y0);
+  const xs = [...new Set(clipped.flatMap((r) => [r.x0, r.x1]))].sort((a, b) => a - b);
+  let total = 0;
+  for (let i = 0; i + 1 < xs.length; i++) {
+    const [a, b] = [xs[i], xs[i + 1]];
+    const spans = clipped.filter((r) => r.x0 <= a && r.x1 >= b).map((r) => [r.y0, r.y1]).sort((p, q) => p[0] - q[0]);
+    let covered = 0, top = -Infinity;
+    for (const [y0, y1] of spans) {
+      if (y1 <= top) continue;
+      covered += y1 - Math.max(y0, top);
+      top = y1;
+    }
+    total += covered * (b - a);
+  }
+  return total;
 }
