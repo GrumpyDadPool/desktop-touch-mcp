@@ -62,7 +62,7 @@ import {
 import type { WindowBlockAnswer, SnapshotWindowAnswer, TouchAction, RoiCapture, RoiCaptureMaterial, SemanticDiff, ViewportVerdict } from "../engine/world-graph/guarded-touch.js";
 import { SnapshotIngress } from "../engine/world-graph/candidate-ingress.js";
 import type { TargetSpec } from "../engine/world-graph/session-registry.js";
-import { composeCandidates } from "./desktop-providers/compose-providers.js";
+import { composeCandidates, composeCandidatesOnly } from "./desktop-providers/compose-providers.js";
 import { getVisualRuntime } from "../engine/vision-gpu/runtime.js";
 import { PocVisualBackend } from "../engine/vision-gpu/poc-backend.js";
 import { OnnxBackend } from "../engine/vision-gpu/onnx-backend.js";
@@ -716,8 +716,7 @@ async function initVisualRuntime(): Promise<void> {
  */
 export function getDesktopFacade(): DesktopFacade {
   if (!_facade) {
-    const provider: CandidateProvider = async (input: DesktopSeeInput) =>
-      (await composeCandidates(input.target)).candidates;
+    const provider: CandidateProvider = async (input: DesktopSeeInput) => composeCandidatesOnly(input.target);
 
     // internal #218: every discover reads; see `SnapshotIngress`.
     const ingress = new SnapshotIngress((key: string) => composeCandidates(targetKeyToSpec(key)));
@@ -1914,7 +1913,7 @@ export function registerDesktopTools(server: McpServer): void {
       "Raw screen coordinates are NOT returned in normal mode (debug=true only).",
       "If response.warnings[] is non-empty, results may be partial.",
       "response.constraints (when present) is a structured summary of provider limitations — use it to decide fallback without parsing warnings[] strings.",
-      "constraints.entityZeroReason (when entities is empty) explains WHY: foreground_unresolved → add target.windowTitle; query_no_match → query matched nothing read (off-screen text, and text UIA does not expose — spreadsheet cell values, some document bodies and Java windows — are never in the list; with uia_tree_truncated it may also lie past the cap): scroll it into view and call again, or read visible text with screenshot(detail='ocr'); target_window_gone → the window target.hwnd named has closed; discover the window it belonged to, or call without target.hwnd;",
+      "constraints.entityZeroReason (when entities is empty) explains WHY: foreground_unresolved → add target.windowTitle; query_no_match → query matched nothing read (off-screen text, and text UIA does not expose — spreadsheet cell values, some document bodies and Java windows — are never in the list; with uia_tree_truncated it may also lie past the cap): scroll it into view and call again, or read visible text with screenshot(detail='ocr'); target_window_gone → the window target.hwnd named has closed; discover the window it belonged to, or call without target.hwnd; window_excluded → the target is excluded from every tool surface of this server (the key locker's own windows): nothing was read, and calling again returns the same, so target another window;",
       "uia_blind_visual_incapable → the attached visual backend recognises nothing (the default build); waiting never changes it, so enable a recognising backend or use screenshot(ocrFallback=always) / V1 tools;",
       "uia_blind_visual_unready → retry when visual backend is ready or use screenshot(ocrFallback=always);",
       "uia_blind_visual_empty → use screenshot(ocrFallback=always) or V1 click_element;",
