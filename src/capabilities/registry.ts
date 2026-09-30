@@ -18,6 +18,7 @@
  */
 
 import type { UiEntity } from "../engine/world-graph/types.js";
+import { keyboardHostOf } from "../engine/keyboard-hosts.js";
 import type {
   EntityCapabilities,
   ViewConstraints,
@@ -111,6 +112,7 @@ const TOGGLE_PATTERN = "TogglePattern";
  */
 const SELECTION_ONLY_CONTROLS = new Set(["ListItem", "TabItem", "TreeItem"]);
 
+
 function lookupDefault(
   entity: UiEntity,
   viewConstraints?: ViewConstraints,
@@ -168,6 +170,11 @@ function lookupDefault(
       // 明示する。`hasInvoke` ブランチ (line 144-145) は SR-5 で touch しない
       // (Phase 2 E contract test bit-equal 維持、sub-plan §1.4 P1-2 確定)。
       cap = { preferredExecutors: ["uia", "keyboard"] };
+    } else if (hasRect && keyboardHostOf(entity) !== undefined) {
+      cap = {
+        preferredExecutors: ["mouse", "keyboard"],
+        unsupportedExecutors: ["uia"],
+      };
     } else if (hasRect) {
       cap = {
         preferredExecutors: ["mouse"],

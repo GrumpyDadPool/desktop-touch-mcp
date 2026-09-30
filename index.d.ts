@@ -34,6 +34,10 @@ export interface NativeUiElement {
   runtimeId?: string | null
   /** internal #211 (B) — `/<ControlType>[<index among siblings>]` per level from the read's root. */
   path?: string | null
+  /** internal #224 — the window the element is drawn in: its own handle, else the nearest ancestor's in this read. */
+  hostWindowHandle?: string | null
+  /** internal #224 — the class of that window; absent when not read, and on an older addon. */
+  hostWindowClass?: string | null
 }
 
 export interface NativeUiElementsResult {

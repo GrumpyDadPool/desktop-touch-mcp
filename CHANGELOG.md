@@ -93,11 +93,20 @@
   children of its document area with one small pane, and the walk used that request, so it never
   listed a page or the body. A read of Word now lists each visible page and its body, a `textbox`
   that can be clicked. Pages scrolled past are left out, as other offscreen elements are. Other
-  applications read as before. Typing into the body with `desktop_act` is refused for now: click
-  the body, then use `keyboard`.
+  applications read as before.
+
+- **`desktop_act` types into Word's body.** The body offers UI Automation no value to write, so
+  `desktop_act(type)` had no route into it and was refused. It is now offered the keyboard, and the
+  characters are posted to Word's document window. They land at Word's caret whether Word is in front
+  or behind, and whatever holds Word's focus. Before, the ribbon's font-size box took them. The caret
+  may be on another page than the body named. The reply says the landing could not be confirmed.
+  Word's AutoCorrect applies to the text as it does to typing. `setValue` is refused, because
+  keystrokes insert rather than replace: select the text first, then `type`. In Word, ctrl+a
+  selects the whole document. If a dialog is open over Word, or Word's document window has changed
+  since the read, nothing is typed. Other text fields with no value are refused as before.
 
 - **`desktop_act` says why it refuses a `type` that nothing here can carry.** An element no route
-  here can type into, such as Word's body, got `executor_failed` with no `detail`, and the advice
+  here can type into got `executor_failed` with no `detail`, and the advice
   said UIA setValue and background WM_CHAR had been tried. Neither had run. `detail` now says that
   nothing was tried, why each route could not carry the text, and what to do instead. For `type`,
   place the caret yourself and type with `keyboard`. For `setValue`, select the contents first.

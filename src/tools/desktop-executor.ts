@@ -59,6 +59,7 @@ import {
 // ADR-036 family 2 — the Edit-family read-only rule lives beside the receiver reader, because the
 // `keyboard` tool's road judges the same bit on the same classes (arm A, 2026-09-16).
 import { editReadOnlyOf, hwnd32, sameHwnd } from "../engine/receiver-facts.js";
+import { KEYBOARD_HOST_CLASSES, keyboardHostOf } from "../engine/keyboard-hosts.js";
 
 // ── Injectable backend interface ──────────────────────────────────────────────
 
@@ -178,7 +179,7 @@ export interface ExecutorDeps {
   keyboardResolve?(
     windowTitle: string,
     hwnd: bigint | undefined,
-    refs: { entityHwnd?: bigint; originHwnd?: bigint },
+    refs: { entityHwnd?: bigint; originHwnd?: bigint; hostHwnd?: bigint },
   ): Promise<KeyboardReceipt>;
   /** Post `text` to exactly `receipt.receiverHwnd`, the handle that was judged, without asking the focus again. */
   keyboardPost?(receipt: KeyboardReceipt, text: string): Promise<void>;
@@ -1413,6 +1414,15 @@ async function keyboardRung(
   // Internal #157: from the two values this rung hands its backends, so the row cannot say one window
   // while the lookup used another (gate 2 on public #721).
   const addressedWindowBy = addressedWindowByOf(winTitle, aimHwnd);
+  // internal #224 — the window a field is drawn in, for the resolve to post into: only a field this
+  // route was measured on (`keyboard-hosts.ts`), and only on its own road. A field whose value road
+  // failed keeps the receiver it had (gate 2).
+  const hostHwnd = why === "keyboard_only_entity" ? keyboardHostOf(entity) : undefined;
+  // Neither road below can post into the host: both type to whatever holds the focus, which in Word can
+  // be a ribbon box (codex on public #758). Before the host road there was no road for such a field.
+  if (hostHwnd !== undefined && (sw.unchecked || !d.keyboardResolve || !d.keyboardPost)) {
+    throw new KeyboardHostUnavailableError(entity, "cannot_post");
+  }
   // The switch's whole form: today's path exactly — no check, a bare "keyboard".
   if (sw.unchecked) {
     const receipt = await d.keyboardTypeBg(winTitle, text, aimHwnd);
@@ -1481,7 +1491,7 @@ async function keyboardRung(
     });
     throw goneError("native_not_found");
   }
-  const receipt = await d.keyboardResolve(winTitle, aimHwnd, { entityHwnd, originHwnd });
+  const receipt = await d.keyboardResolve(winTitle, aimHwnd, { entityHwnd, originHwnd, ...(hostHwnd !== undefined && { hostHwnd }) });
   if (valueRoadNotFound && entityHwnd !== undefined && receipt.entityWindowAlive === false) {
     probeRefusal("keyboard", "entity_not_found", aimHwnd, entity, {
       why,
@@ -1498,6 +1508,26 @@ async function keyboardRung(
   // asked (no backend, no handle) is null, never "takes input" and never "does not".
   const takesInput = async (h: bigint | undefined): Promise<boolean | null> =>
     h === undefined || !d.windowTakesInput ? null : ((await d.windowTakesInput(h)) ?? null);
+  if (hostHwnd !== undefined) {
+    // Its only road is the host: a receiver that is not the host is whatever holds the focus (Word's
+    // ribbon box, measured), so it is refused rather than typed into (gate 2).
+    if (receipt.receiverHwnd == null || !sameHwnd(receipt.receiverHwnd, hostHwnd)) {
+      throw new KeyboardHostUnavailableError(entity);
+    }
+    // A posted WM_CHAR ignores a disabled window. With a modal dialog up Word disables its frame, not
+    // `_WwG` (win2, 2026-09-30, the Font dialog), and `windowTakesInput` answers false for a window whose
+    // top-level window is disabled, so the characters are not posted behind the dialog (gate 2). The
+    // act's modal check refused that case first on hardware; this does not rely on it.
+    if ((await takesInput(hostHwnd)) === false) {
+      probeRefusal("keyboard", "keyboard_target_unsafe", aimHwnd, entity, { why, ground: "disabled", referenceFrom: "entity", addressedWindowBy, ...keyboardLanding(entity, receipt, valueRoadError) });
+      throw new KeyboardTargetUnsafeError(
+        "disabled",
+        "host_window",
+        aimHwnd !== undefined ? "handle" : "title",
+        `Refusing to type for entity ${entity.entityId}: disabled, the window it is drawn in (${hostHwnd}) does not take input`,
+      );
+    }
+  }
   const verdict = judgeKeyboardTarget(
     keyboardFactsOf(entity, receipt, { entity: await takesInput(entityHwnd), origin: await takesInput(originHwnd) }, valueRoadError),
     sw.disabled,
@@ -1543,6 +1573,46 @@ function centerInside(
   return cx >= outer.x && cx < outer.x + outer.width && cy >= outer.y && cy < outer.y + outer.height;
 }
 
+/**
+ * internal #224 — a `setValue` on a field whose only route is the keyboard. Keystrokes insert at the
+ * caret; they do not replace the contents, so nothing is typed and the caller is told how to replace
+ * them. `executor_failed`, with this sentence as its `detail`.
+ */
+export class KeyboardCannotReplaceError extends Error implements CallerFacingRefusal {
+  readonly callerDetail: string;
+  constructor(entity: UiEntity) {
+    super(`setValue requested for "${entity.label ?? entity.entityId}", whose only route is the keyboard, which inserts rather than replaces`);
+    this.name = "KeyboardCannotReplaceError";
+    this.callerDetail =
+      `Nothing was typed: "${quotedLabel(entity)}" can only be typed into at its caret, which inserts rather than replaces. ` +
+      `To replace text, select it first — by mouse drag or shift+arrow keys; in Word, ctrl+a selects the whole document, not this page — ` +
+      `then desktop_act(action:'type') with the new text.`;
+  }
+}
+
+/**
+ * internal #224 — a field whose only road is the window it is drawn in, when that window is not usable
+ * now (closed or recreated since discover, moved under another window, or refusing injected input), or
+ * when this server cannot post into a given window at all (a backend without the resolve, or the
+ * rung's unchecked switch). Typing to whatever holds the focus instead is the defect the road exists
+ * to avoid, so nothing is typed. `executor_failed`, with this sentence as its `detail`; no probe row,
+ * for the reason `NoTextRouteError` has none.
+ */
+export class KeyboardHostUnavailableError extends Error implements CallerFacingRefusal {
+  readonly callerDetail: string;
+  constructor(entity: UiEntity, cause: "not_usable" | "cannot_post" = "not_usable") {
+    super(cause === "cannot_post"
+      ? `cannot post into the window "${entity.label ?? entity.entityId}" is drawn in`
+      : `the window "${entity.label ?? entity.entityId}" is drawn in is not usable now`);
+    this.name = "KeyboardHostUnavailableError";
+    this.callerDetail = cause === "cannot_post"
+      ? `Nothing was typed: "${quotedLabel(entity)}" can only be typed into through the window it is drawn in, ` +
+        `and this server is not set up to type into a given window, only into whatever holds the focus, which could be another control.`
+      : `Nothing was typed: the window "${quotedLabel(entity)}" was drawn in when it was read is not usable now, ` +
+        `and typing to whatever holds the focus instead could land in another control. Run desktop_discover again, then type.`;
+  }
+}
+
 type NoTextRouteState = "no-source" | "no-selector" | "blocked" | "not-in-preferred";
 
 const NO_TEXT_ROUTE_WORDS: Record<NoTextRouteState, string> = {
@@ -1558,7 +1628,8 @@ const NO_TEXT_ROUTE_WORDS: Record<NoTextRouteState, string> = {
  * reason would add a slot to ADR-036's grid, and `action_not_offered` contradicts an element that
  * advertises `type`), so the sentence says what the reason's advice cannot. MEASURED win2
  * (2026-09-30): Word's body, an Edit with no UI Automation value, was refused this way in 3–10 ms
- * with no `detail`, under advice saying UIA setValue and background WM_CHAR had been tried.
+ * with no `detail`, under advice saying UIA setValue and background WM_CHAR had been tried. (Word's
+ * body has a keyboard route since; a value-less field drawn in an unmeasured window still lands here.)
  */
 export class NoTextRouteError extends Error implements CallerFacingRefusal {
   readonly callerDetail: string;
@@ -2415,6 +2486,13 @@ export function createDesktopExecutor(
       text !== undefined &&
       (action === "type" || action === "setValue")
     ) {
+      // internal #224 — a field with no value to write takes keystrokes at its caret, which inserts: a
+      // setValue asked for its contents to be replaced, and the keyboard cannot do that (gate 2).
+      // Only the fields whose keyboard route is the host's (`keyboard-hosts.ts`): a field offered the
+      // keyboard for another reason keeps what setValue did for it.
+      if (action === "setValue" && keyboardHostOf(entity) !== undefined) {
+        throw new KeyboardCannotReplaceError(entity);
+      }
       return await keyboardRung(d, entity, winTitle, aimHwnd, text, "keyboard_only_entity");
     }
 
@@ -2736,7 +2814,7 @@ function getSharedRealDeps(): ExecutorDeps {
     },
 
     async keyboardResolve(windowTitle, hwnd, refs) {
-      const { enumWindowsInZOrder, getWindowRoot, windowIsAlive } = await import("../engine/win32.js");
+      const { enumWindowsInZOrder, getWindowRoot, windowIsAlive, getWindowClassName } = await import("../engine/win32.js");
       const { resolveKeyTarget, canInjectViaPostMessage } = await import("../engine/bg-input.js");
       const wins = enumWindowsInZOrder();
       // As `keyboardTypeBg` looks the window up, except that a handle is compared in its low 32 bits
@@ -2766,7 +2844,27 @@ function getSharedRealDeps(): ExecutorDeps {
       // Resolved once: this is the handle the rule judges and `keyboardPost` posts to. It is always a
       // handle — the window itself when its thread has no focus, or when the question could not be
       // asked — which the rule reads as "cannot say" (step 4), not as an unknown receiver.
-      const receiver = resolveKeyTarget(win.hwnd);
+      //
+      // internal #224 — except for a control with no window of its own that is drawn in a CHILD
+      // window of this one: the receiver is that child window. MEASURED win2 (2026-09-30), Word's
+      // body in `_WwG`: a WM_CHAR posted to `_WwG` is typed at the body's caret in the foreground and
+      // the background alike, and whatever holds Word's focus — with the ribbon's font-size box
+      // focused, the thread's focus was that box and the characters went into it. The window itself
+      // as host (a WPF window, anything drawn in the top level) keeps the thread's focus: that host
+      // is every control in the window, not this one's. The rule then judges the child as it would
+      // any receiver, and says it cannot confirm the named control (step 7, `entity_windowless`).
+      // The rung hands a host only for a measured class (`keyboard-hosts.ts`); a host the inject check
+      // refuses is not taken, and the receiver is the one it was before (gate 2). Nor is a handle whose
+      // class is not a measured host any more: Word can destroy its `_WwG` and Windows can hand the
+      // number to another child of the same frame, which is alive, under the same root and injectable
+      // (codex on public #758).
+      const hostIsChild = refs.hostHwnd !== undefined
+        && !sameHwnd(refs.hostHwnd, win.hwnd)
+        && windowIsAlive(refs.hostHwnd) === true
+        && KEYBOARD_HOST_CLASSES.has(getWindowClassName(refs.hostHwnd))
+        && sameHwnd(getWindowRoot(refs.hostHwnd) ?? 0n, getWindowRoot(win.hwnd) ?? win.hwnd)
+        && canInjectViaPostMessage(refs.hostHwnd).supported;
+      const receiver = hostIsChild ? refs.hostHwnd as bigint : resolveKeyTarget(win.hwnd);
       const check = canInjectViaPostMessage(receiver);
       if (!check.supported) {
         throw new Error(
