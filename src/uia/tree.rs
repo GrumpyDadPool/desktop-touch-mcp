@@ -46,6 +46,9 @@ pub struct GetElementsOptions {
     /// a window's frame without registering MSAA clientside providers, which gives the frame
     /// English names this one does not use.
     pub hwnd: Option<String>,
+    /// internal #217 part 2 — read the visible text of each Word page body the walk keeps
+    /// (`UiElement::visible_text`). Only `desktop_discover` asks, and only to match its `query`.
+    pub read_body_text: Option<bool>,
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -64,6 +67,11 @@ fn get_elements_impl(ctx: &UiaContext, opts: &GetElementsOptions) -> napi::Resul
     let max_depth = opts.max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
     let max_elements = opts.max_elements.unwrap_or(DEFAULT_MAX_ELEMENTS);
     let fetch_values = opts.fetch_values.unwrap_or(false);
+    let read_body_text = opts.read_body_text.unwrap_or(false);
+    // Word's text reads share the read's 8 s timeout with everything else; past this budget the
+    // remaining bodies are left unread rather than the whole read lost (gate 2). Only the reads
+    // themselves count: the navigation to the pages has its own budget (codex on #759).
+    let mut body_text_spent = std::time::Duration::ZERO;
 
     let root = resolve_root(ctx, opts.hwnd.as_deref(), &opts.window_title)?;
 
@@ -173,6 +181,19 @@ fn get_elements_impl(ctx: &UiaContext, opts: &GetElementsOptions) -> napi::Resul
                 ui_elem.path = path.clone();
                 ui_elem.host_window_handle = host.as_ref().map(|(h, _)| h.clone());
                 ui_elem.host_window_class = host.as_ref().and_then(|(_, c)| c.clone());
+                if read_body_text
+                    && body_text_spent < BODY_TEXT_BUDGET
+                    && word_pages::is_word_body(
+                        &ui_elem.control_type,
+                        &ui_elem.automation_id,
+                        ui_elem.native_window_handle.is_some(),
+                        ui_elem.host_window_class.as_deref(),
+                    )
+                {
+                    let started = Instant::now();
+                    ui_elem.visible_text = visible_text(&child, started + (BODY_TEXT_BUDGET - body_text_spent));
+                    body_text_spent += started.elapsed();
+                }
                 elements.push(ui_elem);
             }
 
@@ -195,6 +216,33 @@ fn get_elements_impl(ctx: &UiaContext, opts: &GetElementsOptions) -> napi::Resul
         element_count: elements.len() as u32,
         elements,
     })
+}
+
+/// How long the walk may spend reading Word page bodies' text, all of them together. win2 measured
+/// 1–2 ms a body; a body read after this is left without text, as though it had not been asked.
+const BODY_TEXT_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// internal #217 part 2 — the text visible in a Word page body.
+///
+/// MEASURED win2 (2026-09-30): a page body's TextPattern answers that page alone (not the document);
+/// `GetVisibleRanges` gives one range per visible paragraph, in 1–2 ms with each range's text read.
+/// The walk has already pruned offscreen pages, so only the bodies on screen are read. `None` when
+/// the element does not answer, the count included; an empty string when nothing of it is visible.
+/// A range whose text does not answer is left out, and so are the ranges left when `deadline` passes:
+/// the budget is checked between ranges, not only after a body (codex on #759).
+fn visible_text(elem: &IUIAutomationElement, deadline: Instant) -> Option<String> {
+    unsafe {
+        let pat = elem.GetCurrentPattern(UIA_TextPatternId).ok()?;
+        let tp: IUIAutomationTextPattern = pat.cast().ok()?;
+        let ranges = tp.GetVisibleRanges().ok()?;
+        let count = ranges.Length().ok()?;
+        let cap = word_pages::BODY_TEXT_CAP as i32;
+        let lines = (0..count).take_while(|_| Instant::now() < deadline).filter_map(|i| {
+            let range = ranges.GetElement(i).ok()?;
+            range.GetText(cap).ok().map(|t| t.to_string())
+        });
+        Some(word_pages::join_visible_lines(lines))
+    }
 }
 
 /// How long the navigation of Word's document area may take: one RPC per child, in series, and the
@@ -433,6 +481,7 @@ fn extract_element(
             path: None,
             host_window_handle: None,
             host_window_class: None,
+            visible_text: None,
         })
     }
 }
