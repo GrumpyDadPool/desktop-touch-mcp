@@ -93,8 +93,15 @@
   children of its document area with one small pane, and the walk used that request, so it never
   listed a page or the body. A read of Word now lists each visible page and its body, a `textbox`
   that can be clicked. Pages scrolled past are left out, as other offscreen elements are. Other
-  applications read as before. Typing into the body with `desktop_act` is refused for now, after
-  a wait of several seconds: click the body, then use `keyboard`.
+  applications read as before. Typing into the body with `desktop_act` is refused for now: click
+  the body, then use `keyboard`.
+
+- **`desktop_act` says why it refuses a `type` that nothing here can carry.** An element no route
+  here can type into, such as Word's body, got `executor_failed` with no `detail`, and the advice
+  said UIA setValue and background WM_CHAR had been tried. Neither had run. `detail` now says that
+  nothing was tried, why each route could not carry the text, and what to do instead. For `type`,
+  place the caret yourself and type with `keyboard`. For `setValue`, select the contents first.
+  The advice defers to `detail` in that case.
 
 - **`desktop_discover` says when the window it was asked about is excluded.** A window this
   server keeps out of every tool, such as the key locker's own, used to answer

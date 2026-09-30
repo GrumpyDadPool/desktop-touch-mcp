@@ -35,6 +35,7 @@ import {
   containsPoint,
   type Aim,
   type WindowIdentity,
+  type CallerFacingRefusal,
   AimIdentityChangedError,
   AimOccludedError,
   AimBlockedByExcludedWindowError,
@@ -1542,6 +1543,46 @@ function centerInside(
   return cx >= outer.x && cx < outer.x + outer.width && cy >= outer.y && cy < outer.y + outer.height;
 }
 
+type NoTextRouteState = "no-source" | "no-selector" | "blocked" | "not-in-preferred";
+
+const NO_TEXT_ROUTE_WORDS: Record<NoTextRouteState, string> = {
+  "no-source": "not how this element was read",
+  "no-selector": "no page selector for it",
+  blocked: "ruled out for this element",
+  "not-in-preferred": "not offered for this element",
+};
+
+/**
+ * internal #224 — a `type` / `setValue` that no route here can carry to this element. Nothing was
+ * typed and no road was taken. It is still `executor_failed` (the user's choice, 2026-09-30: a new
+ * reason would add a slot to ADR-036's grid, and `action_not_offered` contradicts an element that
+ * advertises `type`), so the sentence says what the reason's advice cannot. MEASURED win2
+ * (2026-09-30): Word's body, an Edit with no UI Automation value, was refused this way in 3–10 ms
+ * with no `detail`, under advice saying UIA setValue and background WM_CHAR had been tried.
+ */
+export class NoTextRouteError extends Error implements CallerFacingRefusal {
+  readonly callerDetail: string;
+  constructor(entity: UiEntity, action: string, routes: Record<"uia" | "cdp" | "terminal" | "keyboard", NoTextRouteState>) {
+    super(
+      `setValue/type requested for "${entity.label ?? entity.entityId}" but no text-capable executor available ` +
+      `(uia=${routes.uia}, cdp=${routes.cdp}, terminal=${routes.terminal}, keyboard=${routes.keyboard}) — mouse fallback would drop the text payload`,
+    );
+    this.name = "NoTextRouteError";
+    const why =
+      `UI Automation: ${NO_TEXT_ROUTE_WORDS[routes.uia]}; browser: ${NO_TEXT_ROUTE_WORDS[routes.cdp]}; ` +
+      `terminal: ${NO_TEXT_ROUTE_WORDS[routes.terminal]}; keyboard: ${NO_TEXT_ROUTE_WORDS[routes.keyboard]}`;
+    // A click at the centre of a large field puts the caret mid-text, and a setValue replaces:
+    // the way round differs by action (gate 2).
+    const instead = action === "setValue"
+      ? "To replace its contents, click it, select them with keyboard ctrl+a, then keyboard({action:'type', text, method:'foreground'})."
+      : "Put the caret where the text should go (click there, or move it with keyboard keys such as ctrl+End), then keyboard({action:'type', text, method:'foreground'}).";
+    // The view's own reason, when it gave one (no value pattern, a failed provider): the route words
+    // say which gate closed, this says why (gate 2).
+    const hint = entity.fallbackHint !== undefined ? ` The view says: ${entity.fallbackHint}.` : "";
+    this.callerDetail = `Nothing was typed, and no route was tried: no route here can carry text to "${quotedLabel(entity)}" (${why}).${hint} ${instead}`;
+  }
+}
+
 /**
  * The entity's label as a caller's sentence quotes it. A label has no bound (a UIA Name can be a
  * paragraph) and the envelope cuts `detail` at 1000 characters, so an uncut label could push out the
@@ -2383,17 +2424,27 @@ export function createDesktopExecutor(
     // (UIA / CDP / terminal) was skipped or blocked, the previous fall-through
     // to a bare `mouseClick(rectCenter)` silently dropped the text payload —
     // the LLM thinks it typed something, but only a focus click was issued.
-    // Throw a typed `executor_failed`-shaped error instead so the guarded-touch
-    // wrapper surfaces `ok:false reason:'executor_failed'` and the caller can
-    // diagnose the dropped payload rather than chasing a phantom-typed bug.
+    // Throw instead, so the guarded-touch wrapper surfaces `ok:false reason:'executor_failed'`
+    // and the caller can diagnose the dropped payload rather than chasing a phantom-typed bug —
+    // with `detail` saying nothing was tried (internal #224, `NoTextRouteError`).
     if (text !== undefined && (action === "type" || action === "setValue")) {
       // ADR-020 SR-5 PR-SR5-2: keyboard executor が advertised に昇格したので
       // diagnostic string にも keyboard 経路の skip 理由を含める。
-      const keyboardBlocked = blocked.includes("keyboard");
-      throw new Error(
-        `setValue/type requested for "${entity.label ?? entity.entityId}" but no text-capable executor available ` +
-        `(uia${uiaBlocked ? "=blocked" : "=no-source"}, cdp${cdpBlocked ? "=blocked" : "=no-selector"}, terminal${terminalBlocked ? "=blocked" : "=no-source-or-text"}, keyboard${keyboardBlocked ? "=blocked" : "=not-in-preferred"}) — mouse fallback would drop the text payload`
-      );
+      // internal #224 — each route's state, said as it is: a route with a source that was only left
+      // out of `preferredExecutors` is not "no-source" (gate 2).
+      // `has` is each route's own entry test, so the last arm (has, not blocked, preferred) cannot be
+      // reached: that route would have run (gate 2 — the CDP test was `!== undefined`, not truthy).
+      const state = (has: boolean, isBlocked: boolean, none: "no-source" | "no-selector"): NoTextRouteState =>
+        !has ? none : isBlocked ? "blocked" : "not-in-preferred";
+      const routes: Record<"uia" | "cdp" | "terminal" | "keyboard", NoTextRouteState> = {
+        uia: state(entity.sources.includes("uia"), uiaBlocked, "no-source"),
+        cdp: state(Boolean(cdpSelector), cdpBlocked, "no-selector"),
+        terminal: state(entity.sources.includes("terminal"), terminalBlocked, "no-source"),
+        keyboard: blocked.includes("keyboard") ? "blocked" : "not-in-preferred",
+      };
+      // No probe row: a new rung and refusal value would add a slot to ADR-036's completion grid
+      // (`check:route-vocabulary`), which is the user's decision, not this fix's.
+      throw new NoTextRouteError(entity, action, routes);
     }
     if (mouseBlocked) {
       throw new Error(

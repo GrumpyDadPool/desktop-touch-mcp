@@ -878,7 +878,7 @@ const SUGGESTS: Record<string, string[]> = {
   // matching the wiring the dogfood confirmed actually works.
   ExecutorFailed: [
     "For action='click', fall back to mouse_click({clickAt}) using the entity rect center from {tool:reidentify_element} — common when UIA InvokePattern is missing on the control",
-    "For action='type' or action='setValue': desktop_act has already tried UIA setValue and background WM_CHAR (post-#327 E ladder) before reporting executor_failed. The remaining rung is keyboard({action:'type', text, method:'foreground'}) — foreground SendInput uses the OS input queue and bypasses BG injection blocks that stopped the internal ladder (Chromium hosts, WT-XAML, etc.). Focus the target window first with focus_window or mouse_click",
+    "For action='type' or action='setValue': when detail says no route was tried, follow it. Otherwise, on a UI Automation element desktop_act has already tried UIA setValue and background WM_CHAR (post-#327 E ladder) before reporting executor_failed. The remaining rung is keyboard({action:'type', text, method:'foreground'}) — foreground SendInput uses the OS input queue and bypasses BG injection blocks that stopped the internal ladder (Chromium hosts, WT-XAML, etc.). Focus the target window first with focus_window or mouse_click",
     "If the entity has a stable name or automationId, try click_element({name|automationId}) — uses a different UIA path than desktop_act and may succeed where this executor threw",
     "Re-run {tool:reidentify_element} — the entity may have moved or been re-keyed between discover and act, in which case the executor saw a stale locator",
   ],
