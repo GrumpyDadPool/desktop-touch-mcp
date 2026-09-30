@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UiEntityCandidate } from "../../src/engine/vision-gpu/types.js";
 
 const mocks = vi.hoisted(() => ({
@@ -9,7 +9,8 @@ const mocks = vi.hoisted(() => ({
   fetchVisualCandidates: vi.fn(),
 }));
 
-vi.mock("../../src/tools/_resolve-window.js", () => ({
+vi.mock("../../src/tools/_resolve-window.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/tools/_resolve-window.js")>()),
   resolveWindowTarget: mocks.resolveWindowTarget,
 }));
 
@@ -41,12 +42,34 @@ vi.mock("../../src/engine/win32.js", async (importOriginal) => {
     ...actual,
     getWindowIdentity: vi.fn(() => ({ pid: 1234, processName: "notepad.exe", processStartTimeMs: 111 })),
     getWindowClassName: vi.fn(() => "Notepad"),
+    enumWindowsInZOrder: vi.fn(() => []),
     getWindowTitleW: vi.fn(() => "Untitled - Notepad"),
     getWindowRectByHwnd: vi.fn(() => rectRef.value),
   };
 });
 
 import { composeCandidates } from "../../src/tools/desktop-providers/compose-providers.js";
+import { enumWindowsInZOrder, getWindowClassName } from "../../src/engine/win32.js";
+
+/** internal #220 — the terminal road is taken by the window's class; these handles are terminals. */
+function classes(byHandle: Record<string, string>) {
+  vi.mocked(getWindowClassName).mockImplementation((h: unknown) => byHandle[String(h)] ?? "Notepad");
+}
+
+// Each cell's handle→class map and desktop stay in that cell (gate 2: they leaked into later cells).
+afterEach(() => {
+  vi.mocked(getWindowClassName).mockImplementation(() => "Notepad");
+  vi.mocked(enumWindowsInZOrder).mockImplementation(() => []);
+});
+
+type Win = ReturnType<typeof enumWindowsInZOrder>[number];
+function desktop(...wins: Array<{ hwnd: bigint; title: string; className: string; ownerHwnd?: bigint }>) {
+  vi.mocked(enumWindowsInZOrder).mockImplementation(() => wins.map((w, i) => ({
+    region: { x: 0, y: 0, width: 800, height: 600 }, zOrder: i, isMinimized: false, isMaximized: false, isActive: i === 0,
+    ownerHwnd: null, ...w,
+  }) as unknown as Win));
+  classes(Object.fromEntries(wins.map((w) => [String(w.hwnd), w.className])));
+}
 
 function candidate(
   label: string,
@@ -225,6 +248,7 @@ describe("composeCandidates — H4 visual escalation (uia-blind + visual state)"
 
 describe("composeCandidates — active target fallback", () => {
   it("hwnd-only target resolves the live title before terminal routing", async () => {
+    classes({ "321": "CASCADIA_HOSTING_WINDOW_CLASS" });
     mocks.resolveWindowTarget.mockResolvedValue({
       title: "Windows Terminal",
       hwnd: 321n,
@@ -252,7 +276,8 @@ describe("composeCandidates — active target fallback", () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it("resolved active terminal title routes through the terminal path", async () => {
+  it("resolved active terminal window routes through the terminal path", async () => {
+    classes({ "456": "ConsoleWindowClass" });
     mocks.resolveWindowTarget.mockResolvedValue({
       title: "PowerShell 7",
       hwnd: 456n,
@@ -265,6 +290,73 @@ describe("composeCandidates — active target fallback", () => {
     expect(mocks.fetchUiaCandidates).toHaveBeenCalledWith({ hwnd: "456", windowTitle: "PowerShell 7" });
     expect(mocks.fetchVisualCandidates).toHaveBeenCalledWith({ hwnd: "456", windowTitle: "PowerShell 7" });
     expect(mocks.fetchBrowserCandidates).not.toHaveBeenCalled();
+  });
+
+  it("pins a title-only terminal to the window its class came from, so the lanes read that one (gate 2)", async () => {
+    mocks.resolveWindowTarget.mockResolvedValue(null);
+    desktop(
+      { hwnd: 50n, title: "npm run dev", className: "ConsoleWindowClass" },
+      { hwnd: 51n, title: "npm - Google Chrome", className: "Chrome_WidgetWin_1" },
+    );
+    await composeCandidates({ windowTitle: "npm" });
+    expect(mocks.fetchTerminalCandidates).toHaveBeenCalledWith({ windowTitle: "npm", hwnd: "50" });
+    expect(mocks.fetchUiaCandidates).toHaveBeenCalledWith({ windowTitle: "npm", hwnd: "50" });
+  });
+
+  it("returns that handle as the target read, so the session and desktop_act hold it (codex P1)", async () => {
+    mocks.resolveWindowTarget.mockResolvedValue(null);
+    desktop(
+      { hwnd: 50n, title: "npm run dev", className: "ConsoleWindowClass" },
+      { hwnd: 51n, title: "npm - Google Chrome", className: "Chrome_WidgetWin_1" },
+    );
+    const result = await composeCandidates({ windowTitle: "npm" });
+    expect(result.target).toEqual({ windowTitle: "npm", hwnd: "50" });
+  });
+
+  it("returns a title-only target that is not a terminal as it came (the control)", async () => {
+    mocks.resolveWindowTarget.mockResolvedValue(null);
+    desktop({ hwnd: 51n, title: "npm - Google Chrome", className: "Chrome_WidgetWin_1" });
+    const result = await composeCandidates({ windowTitle: "npm" });
+    expect(result.target).toEqual({ windowTitle: "npm" });
+  });
+
+  it("does not pin a title-only target that is not a terminal (the control)", async () => {
+    mocks.resolveWindowTarget.mockResolvedValue(null);
+    desktop({ hwnd: 51n, title: "npm - Google Chrome", className: "Chrome_WidgetWin_1" });
+    await composeCandidates({ windowTitle: "npm" });
+    expect(mocks.fetchTerminalCandidates).not.toHaveBeenCalled();
+    expect(mocks.fetchUiaCandidates).toHaveBeenCalledWith({ windowTitle: "npm" });
+  });
+
+  it("looks the title up past a console's owned dialog in front of it, as normalizeTarget does (gate 2)", async () => {
+    mocks.resolveWindowTarget.mockResolvedValue(null);
+    desktop(
+      { hwnd: 61n, title: "\"Windows PowerShell\" Properties", className: "#32770", ownerHwnd: 60n },
+      { hwnd: 60n, title: "Windows PowerShell", className: "ConsoleWindowClass" },
+    );
+    await composeCandidates({ windowTitle: "Windows PowerShell" });
+    expect(mocks.fetchTerminalCandidates).toHaveBeenCalledWith({ windowTitle: "Windows PowerShell", hwnd: "60" });
+  });
+
+  it("does not guess the foreground for an @active that normalizeTarget could not resolve (gate 2)", async () => {
+    mocks.resolveWindowTarget.mockRejectedValue(new Error("no foreground"));
+    desktop({ hwnd: 70n, title: "@active console", className: "ConsoleWindowClass" });
+    await composeCandidates({ windowTitle: "@active" });
+    expect(mocks.fetchTerminalCandidates).not.toHaveBeenCalled();
+  });
+
+  it("does not take a browser page titled after a shell down the terminal road (internal #220)", async () => {
+    classes({ "789": "Chrome_WidgetWin_1" });
+    mocks.resolveWindowTarget.mockResolvedValue({
+      title: "Bash scripting QT20X - Google Chrome",
+      hwnd: 789n,
+      warnings: [],
+    });
+
+    await composeCandidates({ hwnd: "789" });
+
+    expect(mocks.fetchTerminalCandidates).not.toHaveBeenCalled();
+    expect(mocks.fetchUiaCandidates).toHaveBeenCalledWith({ hwnd: "789", windowTitle: "Bash scripting QT20X - Google Chrome" });
   });
 
   it("prepends active-target resolution warnings ahead of provider warnings", async () => {

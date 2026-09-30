@@ -37,7 +37,7 @@ import { fetchBrowserCandidates }  from "./browser-provider.js";
 import { fetchTerminalCandidates } from "./terminal-provider.js";
 import { fetchVisualCandidates }   from "./visual-provider.js";
 import { fetchOcrCandidates }      from "./ocr-provider.js";
-import { resolveWindowTarget }     from "../_resolve-window.js";
+import { resolveWindowTarget, findPlainTopLevelWindowsByTitle } from "../_resolve-window.js";
 import { WindowExcludedError }     from "../../engine/tool-exclusion.js";
 import { probeAim, probeLane, type ProbeLane } from "../../engine/aim-probe.js";
 import { containsPoint, toAim, readWindowIdentityFields, type WindowIdentity, type WindowRect, type AimOrigin } from "../../engine/aim.js";
@@ -78,21 +78,54 @@ function settledLane(lane: ProbeLane, s: PromiseSettledResult<ProviderResult>, f
 }
 
 /**
- * Heuristic terminal title patterns.
+ * internal #220 — the top-level window classes the terminal lane reads, decided by the window and not
+ * by its title. MEASURED win2 (2026-09-30, `101f43b8`): a regex over the title sent a Chrome page
+ * titled "Bash scripting" down the terminal road (hwnd targets too, since their real title is filled
+ * in), pushing the page's own controls to entries 14–18 and skipping OCR, while of eight real
+ * terminals only a Windows Terminal tab titled "PowerShell" matched. Their classes: conhost
+ * (cmd, PowerShell, WSL) `ConsoleWindowClass`, Windows Terminal (and cmd.exe when it is the default
+ * terminal app) `CASCADIA_HOSTING_WINDOW_CLASS`. Not here: Git Bash's `mintty` (whether the lane can
+ * read it is not measured) and VS Code's integrated terminal (a page inside `Chrome_WidgetWin_1`).
  *
- * Design notes:
- * - Use word boundaries (\b) for short tokens like "sh", "wsl", "cmd" to avoid
- *   matching "Photoshop", "Dashboard", "cmd inside longer title", etc.
- * - "cmd.exe" doesn't appear in window titles — use "Command Prompt" instead.
- * - "terminal" is a common substring — anchor with \b to reduce false positives.
- *
- * A future improvement: prefer processName checks (more reliable than title).
+ * Not `bg-input.ts`'s `TERMINAL_WINDOW_CLASSES`: that set answers "takes a posted WM_CHAR", which
+ * Windows Terminal does not, and this one answers "has a buffer the lane reads".
  */
-const TERMINAL_TITLE_PATTERN =
-  /powershell|\bcommand prompt\b|\bterminal\b|\bbash\b|\b(wsl|zsh|fish|ksh|sh)\b|git.?bash|conemu|mintty/i;
+const TERMINAL_READ_CLASSES: ReadonlySet<string> = new Set(["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"]);
 
-export function isTerminalTarget(target: TargetSpec | undefined): boolean {
-  return TERMINAL_TITLE_PATTERN.test(target?.windowTitle ?? "");
+/** How `isTerminalTarget` finds a target's window and its class; injectable for tests. */
+export interface TerminalLook {
+  windowByTitle(title: string): bigint | undefined;
+  classOf(hwnd: bigint): string;
+}
+
+/**
+ * A title is looked up as `resolveWindowTarget` looked it up a moment earlier in `normalizeTarget`
+ * (plain top-level windows, dialogs and owned windows left out), so the two cannot disagree within
+ * one discover (gate 2: a console's owned Properties dialog in front of it was found instead).
+ * `@active` is not a title: `normalizeTarget` resolves it, and when it could not, nothing here
+ * guesses the foreground, which no lane would read either (gate 2).
+ */
+const OS_LOOK: TerminalLook = {
+  windowByTitle(title) {
+    if (title === "@active") return undefined;
+    return findPlainTopLevelWindowsByTitle(title, { excludeDialogsAndOwned: true, logAs: "off" })[0]?.hwnd;
+  },
+  classOf: (hwnd) => getWindowClassName(hwnd),
+};
+
+/**
+ * The target's window when it is a terminal: its handle when it names one, else the first plain
+ * window answering to its title. `undefined` for any other window, and for one that cannot be found
+ * or whose class cannot be read — the native road, which reads it with UIA as before.
+ */
+export function terminalWindowOf(target: TargetSpec | undefined, look: TerminalLook = OS_LOOK): bigint | undefined {
+  if (!target || target.tabId) return undefined;
+  const hwnd = parseTargetHwnd(target) ?? (target.windowTitle ? look.windowByTitle(target.windowTitle) : undefined);
+  return hwnd !== undefined && TERMINAL_READ_CLASSES.has(look.classOf(hwnd)) ? hwnd : undefined;
+}
+
+export function isTerminalTarget(target: TargetSpec | undefined, look: TerminalLook = OS_LOOK): boolean {
+  return terminalWindowOf(target, look) !== undefined;
 }
 
 export function isBrowserTarget(target: TargetSpec | undefined): boolean {
@@ -424,6 +457,13 @@ export async function composeCandidates(
     return { candidates: [], warnings: normalized.warnings, target: normalized.target, identityRead: true };
   }
 
+  // internal #220 — a title-only terminal is read by the handle its class came from, and that handle
+  // is what the observation says it read: the identity, the origin and the returned target, so the
+  // session holds it and `desktop_act` writes to the window the entities came from rather than
+  // finding the title again (codex P1 on #761).
+  const terminalHwnd = normalized.target.hwnd === undefined ? terminalWindowOf(normalized.target) : undefined;
+  const aimed: TargetSpec = terminalHwnd !== undefined ? { ...normalized.target, hwnd: terminalHwnd.toString() } : normalized.target;
+
   // ADR-036 — the resolution and the warnings it produced are applied HERE, once, rather than at
   // each lane's return. A lane added later inherits both instead of having to remember them,
   // which is the disease this ADR is about: identity that is carried by hand gets dropped by hand.
@@ -431,7 +471,7 @@ export async function composeCandidates(
   // a slow or remembered read those are different moments, and a handle recycled in between would be baselined
   // against its new owner (gate 1, 2026-09-09). Taken before the lanes run rather than after, so
   // it describes the window they are about to be pointed at.
-  const identity = readIdentityForTarget(normalized.target);
+  const identity = readIdentityForTarget(aimed);
   // ADR-036 item 5 — and where that window was, so a press taken from these coordinates can be
   // moved with the window instead of staying where the screen used to be.
   //
@@ -454,9 +494,9 @@ export async function composeCandidates(
   // measured against — so the aim records none and no correction runs. Unlike the identity beside
   // it, which fails SAFE when it goes stale (the act-time comparison answers "changed" and the act
   // is refused), a stale origin fails dangerous, which is why only this one is read twice.
-  const originBefore = readOriginRectForTarget(normalized.target);
-  const result = await composeCandidatesInner(normalized.target);
-  const originAfter = readOriginRectForTarget(normalized.target);
+  const originBefore = readOriginRectForTarget(aimed);
+  const result = await composeCandidatesInner(aimed);
+  const originAfter = readOriginRectForTarget(aimed);
   const origin: AimOrigin | undefined =
     originBefore && originAfter
       ? (sameRect(originBefore, originAfter)
@@ -471,7 +511,7 @@ export async function composeCandidates(
       : undefined;
   return {
     ...withPrependedWarnings(result, normalized.warnings),
-    target: normalized.target,
+    target: aimed,
     identity,
     origin,
     // Looked for, whether or not it was found. A later read cannot stand in for this one: it would
@@ -560,11 +600,16 @@ async function composeCandidatesInner(target: TargetSpec): Promise<ProviderResul
     return addWarningIfPartial(finalMerged, browserResult.candidates.length);
   }
 
-  if (isTerminalTarget(target)) {
+  const terminalHwnd = terminalWindowOf(target);
+  if (terminalHwnd !== undefined) {
+    // The road was chosen on this window, so the lanes read it: a title-only target is pinned to
+    // the handle the class came from, rather than each lane finding the title again in its own
+    // order (gate 2: "npm" answering both a console and a browser page).
+    const onWindow: TargetSpec = target!.hwnd !== undefined ? target! : { ...target!, hwnd: terminalHwnd.toString() };
     const [terminal, uia, visual] = await Promise.allSettled([
-      fetchTerminalCandidates(target),
-      fetchUiaCandidates(target),
-      fetchVisualCandidatesWithRetry(target),
+      fetchTerminalCandidates(onWindow),
+      fetchUiaCandidates(onWindow),
+      fetchVisualCandidatesWithRetry(onWindow),
     ]);
     const termResult   = settledLane("terminal", terminal, "terminal_provider_failed");
     const uiaResult    = settledLane("uia", uia, "uia_provider_failed");
