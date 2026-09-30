@@ -1,0 +1,698 @@
+/**
+ * internal #227 — desktop_act and a Windows Terminal window.
+ *
+ * WT takes no posted characters (`wt_xaml_pipeline`), so the background send always failed and the
+ * act ended `executor_failed`. Now the user is asked, and on Accept the text is pasted through the
+ * foreground (the road `terminal(send, method:'foreground_flash')` takes). Built on the production
+ * closures (`createDesktopExecutor` without injected deps), as `resolve-log-desktop-act.test.ts` is.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const WT = 0x100n;
+const wtWindow = (extra: Record<string, unknown> = {}) => ({
+  hwnd: WT, title: "PowerShell", region: { x: 0, y: 0, width: 100, height: 100 }, zOrder: 0,
+  isMinimized: false, isMaximized: false, isActive: false, className: "CASCADIA_HOSTING_WINDOW_CLASS", ownerHwnd: null, ...extra,
+});
+const { state } = vi.hoisted(() => ({
+  state: {
+    cloaked: false, reason: "wt_xaml_pipeline", pid: 11, title: "PowerShell",
+    /** The selected tab UIA reports; `undefined` = could not be read. */
+    tab: { name: "PowerShell", runtimeId: "42.1.4.263", paneCount: 1 } as { name: string; runtimeId: string; paneCount: number } | null | undefined,
+    /** The window in front: another app's (0x999) by default. */
+    fg: 0x999n as bigint | null,
+    /** The terminal window has closed (the enumeration no longer lists it). */
+    gone: false,
+    /** A second window wears the same title. */
+    twin: false,
+    /** Where the twin sits (the terminal is at 0,0 100x100 on a 1000x1000 monitor). */
+    twinRegion: { x: 0, y: 0, width: 100, height: 100 },
+    maximized: false,
+    monitorsThrow: false,
+    twinCloaked: false,
+    /** The twin is listed first (in front of the terminal). */
+    twinFirst: false,
+    twinMaximized: false,
+    minimized: false,
+    /** Runs on each tab read: lets a cell move the foreground while the read is awaited. */
+    onTabRead: undefined as undefined | (() => void),
+  },
+}));
+
+vi.mock("../../src/engine/win32.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/engine/win32.js")>();
+  return {
+    ...actual,
+    enumWindowsInZOrder: vi.fn(() => {
+      if (state.gone) return [];
+      const max = { isMaximized: true, region: { x: -8, y: -8, width: 1016, height: 1016 } };
+      const term = wtWindow({ isCloaked: state.cloaked, title: state.title, isMinimized: state.minimized, ...(state.maximized && max) });
+      const twin = wtWindow({ hwnd: 0x200n, title: state.title, region: state.twinRegion, isCloaked: state.twinCloaked, ...(state.twinMaximized && max) });
+      const list = !state.twin ? [term] : state.twinFirst ? [twin, term] : [term, twin];
+      return list.map((w, i) => ({ ...w, zOrder: i }));
+    }),
+    enumMonitors: vi.fn(() => { if (state.monitorsThrow) throw new Error("no monitors"); return [{ id: 0, handle: 1n, primary: true, bounds: { x: 0, y: 0, width: 1000, height: 1000 },
+      workArea: { x: 0, y: 0, width: 1000, height: 1000 }, dpi: 96, scale: 1 }]; }),
+    getForegroundHwnd: vi.fn(() => state.fg),
+    getWindowRoot: vi.fn((h: bigint) => (h === 0x101n ? WT : h)),
+    getWindowTitleW: vi.fn(() => "PowerShell"),
+    getWindowIdentity: vi.fn(() => ({ pid: state.pid, processName: "WindowsTerminal", processStartTimeMs: 1000 })),
+  };
+});
+
+const mockFlash = vi.fn((..._a: unknown[]) => ({ ok: true, result: {} }));
+const mockPostChars = vi.fn();
+vi.mock("../../src/engine/bg-input.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/engine/bg-input.js")>();
+  return {
+    ...actual,
+    canInjectViaPostMessage: vi.fn(() => ({ supported: false, reason: state.reason, className: "CASCADIA_HOSTING_WINDOW_CLASS" })),
+    postCharsToHwnd: (...a: unknown[]) => mockPostChars(...a),
+    injectViaForegroundFlash: (...a: unknown[]) => mockFlash(...a),
+  };
+});
+
+/** The addon has the native flash (checked before asking); the flash itself is mocked in bg-input. */
+const { native } = vi.hoisted(() => ({ native: { hasFlash: true } }));
+vi.mock("../../src/engine/native-engine.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/engine/native-engine.js")>();
+  return {
+    ...actual,
+    get nativeWin32() {
+      return native.hasFlash ? { ...(actual.nativeWin32 ?? {}), win32ForegroundFlashInject: () => ({}) } : null;
+    },
+  };
+});
+
+const { failsafe } = vi.hoisted(() => ({ failsafe: { tripped: false } }));
+vi.mock("../../src/utils/failsafe.js", () => ({
+  checkFailsafe: vi.fn(async () => { if (failsafe.tripped) throw Object.assign(new Error("FailsafeError"), { name: "FailsafeError" }); }),
+}));
+
+vi.mock("../../src/engine/background-channel-resolver.js", () => ({
+  resolveBackgroundInputChannel: vi.fn((hwnd: bigint) => ({ kind: "clipboard_flash", hwnd, pid: 42, constraints: { maxBytes: 5120, singleLineOnly: true } })),
+}));
+
+vi.mock("../../src/engine/uia-bridge.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/engine/uia-bridge.js")>()),
+  // A cloaked window here is on another desktop (internal #221).
+  getVirtualDesktopStatus: vi.fn(async (hs: string[]) => Object.fromEntries(hs.map((h) => [h, false]))),
+  getSelectedTab: vi.fn(async () => { const tab = state.tab; state.onTabRead?.(); return tab; }),
+}));
+
+const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+const { runWithAskContext } = await import("../../src/tools/_ask-user.js");
+type UiEntity = import("../../src/engine/world-graph/types.js").UiEntity;
+type AskContext = import("../../src/tools/_ask-user.js").AskContext;
+
+const terminalInput = {
+  entityId: "e1", role: "textbox", label: "terminal input", confidence: 0.9, sources: ["terminal"],
+  affordances: [{ verb: "type", executors: ["terminal"], confidence: 0.9, preconditions: [], postconditions: [] }],
+  generation: "gen-1", evidenceDigest: "d-e1",
+} as unknown as UiEntity;
+
+/** `readMs`: how long the person took to answer (a cancel sooner than 500 ms is a client that cannot ask). */
+function asking(answer: Awaited<ReturnType<AskContext["ask"]>>, readMs = 0) {
+  const ask = vi.fn(async () => {
+    if (readMs > 0) vi.spyOn(Date, "now").mockReturnValue(Date.now() + readMs);
+    return answer;
+  });
+  return { ctx: { ask } as AskContext, ask };
+}
+
+const act = (text: string, ctx: AskContext | null) =>
+  runWithAskContext(ctx, () => createDesktopExecutor({ windowTitle: "PowerShell" })(terminalInput, "type", text));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  state.cloaked = false;
+  state.reason = "wt_xaml_pipeline";
+  state.pid = 11;
+  state.title = "PowerShell";
+  state.tab = { name: "PowerShell", runtimeId: "42.1.4.263", paneCount: 1 };
+  state.fg = 0x999n;
+  state.onTabRead = undefined;
+  state.twin = false;
+  state.twinRegion = { x: 0, y: 0, width: 100, height: 100 };
+  state.maximized = false;
+  state.monitorsThrow = false;
+  state.twinCloaked = false;
+  state.twinFirst = false;
+  state.twinMaximized = false;
+  state.gone = false;
+  state.twin = false;
+  state.minimized = false;
+  native.hasFlash = true;
+  failsafe.tripped = false;
+});
+
+describe("internal #227 — desktop_act types into Windows Terminal only when the user allows it", () => {
+  it("asks, and on Accept pastes through the foreground; a trailing newline is sent as Enter", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: { typeIt: true } });
+    await act("echo hi\n", ctx);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(mockFlash).toHaveBeenCalledWith(WT, 42, "echo hi", { pressEnter: true });
+    expect(mockPostChars).not.toHaveBeenCalled();
+  });
+
+  it("pastes without Enter when the text has no trailing newline", async () => {
+    await act("echo hi", asking({ action: "accept", content: {} }).ctx);
+    expect(mockFlash).toHaveBeenCalledWith(WT, 42, "echo hi", { pressEnter: false });
+  });
+
+  it.each([
+    [{ action: "decline" as const }, /the user declined/],
+    [{ action: "cancel" as const }, /the question was dismissed/],
+  ])("types nothing, and says why, on %o", async (answer, detail) => {
+    const err = await act("echo hi", asking(answer, 8_000).ctx).catch((e) => e);
+    vi.restoreAllMocks();
+    expect(err?.name).toBe("TerminalForegroundRefusal");
+    expect(err?.callerDetail).toMatch(detail);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("types nothing when the call cannot ask, and names only the env var, which keeps every check", async () => {
+    const err = await act("echo hi", null).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/cannot ask the user.*tell the user, who can type it themselves/);
+    expect(err?.callerDetail).not.toMatch(/foreground_flash/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about more than one line, and types nothing", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo a\necho b", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/more than one line/);
+    expect(ask).not.toHaveBeenCalled();
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about a terminal on another virtual desktop, and types nothing (internal #221)", async () => {
+    state.cloaked = true;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/another virtual desktop/);
+    expect(ask).not.toHaveBeenCalled();
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+
+  it("does not ask, or paste, for a window refused for another reason (not Windows Terminal)", async () => {
+    state.reason = "class_unknown";
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.name).toBe("BackgroundTerminalUnsupportedError");
+    expect(ask).not.toHaveBeenCalled();
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("reads an instant cancel (claude -p) as a client that cannot ask", async () => {
+    const err = await act("echo hi", asking({ action: "cancel" }).ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/cannot ask the user/);
+  });
+
+  it("accepts a trailing \\r alone as Enter, as terminal send does", async () => {
+    await act("dir\r", asking({ action: "accept", content: {} }).ctx);
+    expect(mockFlash).toHaveBeenCalledWith(WT, 42, "dir", { pressEnter: true });
+  });
+
+  it("does not ask about text longer than one paste takes", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    // 2560 UTF-16 units is 5120 bytes, which the flash refuses (`validate_input`: at the limit); the
+    // question's own limit (600) is lower and answers first.
+    const err = await act("x".repeat(2560), ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/longer than (one paste|the question can show)/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("looks again after the answer: a terminal moved to another desktop meanwhile is not brought forward", async () => {
+    const ask = vi.fn(async () => { state.cloaked = true; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/another virtual desktop/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("says nothing was typed when the flash failed before taking the foreground", async () => {
+    mockFlash.mockReturnValueOnce({ ok: false, reason: "foreground_steal_denied" } as never);
+    const err = await act("echo hi", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    // Refused (foreground_not_allowed), not executor_failed: that advice would type it again.
+    expect(err?.name).toBe("TerminalForegroundRefusal");
+    expect(err?.callerDetail).toMatch(/nothing was typed/);
+  });
+
+  it("asks about what is typed and where, on one line", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act("echo hi", ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ message: string }])[0];
+    expect(form.message).toBe('Type "echo hi" into Windows Terminal (PowerShell)? Takes the foreground ~0.2 s.');
+  });
+
+  it("says a failed paste after an Accept may have typed, under the reason that forbids another road", async () => {
+    mockFlash.mockReturnValueOnce({ ok: false, reason: "wt_paste_warning_intercepted" } as never);
+    const err = await act("echo hi", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    expect(err?.name).toBe("TerminalForegroundRefusal");
+    expect(err?.callerDetail).toMatch(/not known/);
+  });
+
+  it("does not type into another window that took the handle while the user was answering (PR codex P1)", async () => {
+    const ask = vi.fn(async () => { state.pid = 77; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/handle now names another window/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("types when only the window title changed while the user was answering (a prompt retitles its tab); the tab is the same", async () => {
+    const ask = vi.fn(async () => { state.title = "PowerShell - C:\\work"; return { action: "accept" as const, content: {} }; });
+    await act("echo hi", { ask } as AskContext);
+    expect(mockFlash).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not type when the tool call was cancelled after the answer (PR codex P2)", async () => {
+    let cancelled = false;
+    const ctx: AskContext = {
+      ask: vi.fn(async () => { cancelled = true; return { action: "accept" as const, content: {} }; }),
+      cancelled: () => cancelled,
+    };
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/cancelled after the user answered/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not type when the active tab changed while the user was answering (same-titled tabs)", async () => {
+    const ask = vi.fn(async () => { state.tab = { name: "PowerShell", runtimeId: "42.1.4.268", paneCount: 1 }; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/active tab changed while the user was answering; the user agreed to the tab "PowerShell"/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not type when the active tab cannot be read again after the answer", async () => {
+    const ask = vi.fn(async () => { state.tab = undefined; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/could not be read again/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not ask when the window shows no tab: two absent identities would compare equal (PR codex round 8)", async () => {
+    state.tab = null;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/active tab could not be read/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about text longer than the question can show in full", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("x".repeat(601), ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/longer than the question can show in full \(600/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("shows the whole text on the question's description line", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const text = `echo ${"a".repeat(40)} && rm -rf ./x`;
+    await act(text, ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ requestedSchema: { properties: { typeIt: { description: string } } } }])[0];
+    expect(form.requestedSchema.properties.typeIt.description).toBe(`Into: PowerShell (its selected tab) — Types: ${text}`);
+  });
+
+  it("says Enter will be pressed, in the question and on the description line (PR codex round 4)", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act("echo hi\n", ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ message: string; requestedSchema: { properties: { typeIt: { description: string } } } }])[0];
+    expect(form.message).toMatch(/"echo hi" \+ Enter/);
+    expect(form.requestedSchema.properties.typeIt.description).toBe("Into: PowerShell (its selected tab) — Types: echo hi  — then presses Enter");
+  });
+
+  it("does not ask when the active tab cannot be read before the question (PR codex round 4)", async () => {
+    state.tab = undefined;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/active tab could not be read/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+
+  it.each([["a TAB", "echo\tx"], ["ESC", "echo \u001b[2J"], ["a bidi override", "echo \u202eabc"], ["a zero-width space", "echo a\u200bb"]])(
+    "does not ask about text with %s, which the question would not show as the terminal gets it", async (_what, text) => {
+      const { ctx, ask } = asking({ action: "accept", content: {} });
+      const err = await act(text, ctx).catch((e) => e);
+      expect(err?.callerDetail).toMatch(/control, bidirectional or zero-width/);
+      expect(ask).not.toHaveBeenCalled();
+    });
+
+  it("asks about plain text with non-ASCII letters (control)", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act("echo こんにちは", ctx);
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask when the terminal is the window in front (the client runs in one of its tabs, #764 P1-2)", async () => {
+    state.fg = WT;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi\n", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/this terminal is the window in front/);
+    expect(ask).not.toHaveBeenCalled();
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("counts a child of the terminal holding the foreground as the terminal in front (WT's input site)", async () => {
+    state.fg = 0x101n;
+    const err = await act("echo hi", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/window in front/);
+  });
+
+  it("does not type when the user brought the terminal in front while answering", async () => {
+    const ask = vi.fn(async () => { state.fg = WT; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/window in front/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not type when the terminal came in front during the last tab read (PR codex)", async () => {
+    let reads = 0;
+    state.onTabRead = () => { if (++reads === 2) state.fg = WT; };
+    const err = await act("echo hi", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/window in front/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("shows the whole window title, which the one-line question cuts (PR codex round 7)", async () => {
+    state.title = "C:\\Users\\someone\\projects\\alpha-service - PowerShell";
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act("echo hi", ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ requestedSchema: { properties: { typeIt: { description: string } } } }])[0];
+    // The tab's name differs from this title, so it is named too.
+    expect(form.requestedSchema.properties.typeIt.description).toBe(`Into: ${state.title} (selected tab: PowerShell) — Types: echo hi`);
+  });
+
+  // Each title still contains "PowerShell", the title the act looks the window up by.
+  it.each([["too long", `PowerShell ${"x".repeat(190)}`], ["a bidi override", "PowerShell \u202eadmin"]])(
+    "does not ask about a terminal whose title is %s to show", async (_what, title) => {
+      state.title = title;
+      const { ctx, ask } = asking({ action: "accept", content: {} });
+      const err = await act("echo hi", ctx).catch((e) => e);
+      expect(err?.callerDetail).toMatch(/title cannot be shown in full/);
+      expect(ask).not.toHaveBeenCalled();
+    });
+
+  it("does not ask about a tab split into panes: the active pane cannot be read while the user answers", async () => {
+    state.tab = { name: "PowerShell", runtimeId: "42.1.4.263", paneCount: 2 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/split into panes/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not type when the tab was split while the user was answering", async () => {
+    const ask = vi.fn(async () => { state.tab = { name: "PowerShell", runtimeId: "42.1.4.263", paneCount: 2 }; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/split into panes/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not ask when the terminal's process cannot be identified (pid 0 is the read's failure answer, PR codex round 9)", async () => {
+    state.pid = 0;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/process could not be identified/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not type when the terminal closed while the user was answering (a hardware cell, now a unit one)", async () => {
+    const ask = vi.fn(async () => { state.gone = true; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/no longer open/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about a terminal the flash cannot paste into (channel is not clipboard_flash)", async () => {
+    const { resolveBackgroundInputChannel } = await import("../../src/engine/background-channel-resolver.js");
+    vi.mocked(resolveBackgroundInputChannel).mockReturnValueOnce({ kind: "unsupported", reason: "class_unknown" } as never);
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/cannot be pasted into through the foreground \(unsupported\)/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about a selected tab that is not a terminal (no pane: WT's Settings tab, gate 2)", async () => {
+    state.tab = { name: "Settings", runtimeId: "42.1.4.300", paneCount: 0 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/not a terminal/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the foreground cannot be read: the in-front check fails closed (gate 2)", async () => {
+    state.fg = null;
+    const err = await act("echo hi", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/window in front/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it.each([["a soft hyphen", "rm\u00ad -rf x"], ["a Unicode tag", "echo \u{e0041}hi"], ["a variation selector", "echo a\ufe01"], ["a line separator", "echo a\u2028b"]])(
+    "does not ask about text with %s, which the question would not show (gate 2)", async (_what, text) => {
+      const { ctx, ask } = asking({ action: "accept", content: {} });
+      const err = await act(text, ctx).catch((e) => e);
+      expect(err?.callerDetail).toMatch(/control, bidirectional or zero-width/);
+      expect(ask).not.toHaveBeenCalled();
+    });
+
+  it("does not paste when the emergency stop was tripped while the user was answering (gate 2)", async () => {
+    const ask = vi.fn(async () => { failsafe.tripped = true; return { action: "accept" as const, content: {} }; });
+    const err = await act("echo hi", { ask } as AskContext).catch((e) => e);
+    // A refusal (foreground_not_allowed), not executor_failed, whose advice is another road (gate 2).
+    expect(err?.name).toBe("TerminalForegroundRefusal");
+    expect(err?.callerDetail).toMatch(/emergency stop was triggered/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("asks about text with emoji, whose zero-width joiner and VS16 show as part of the emoji", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act('git commit -m "\u2714\ufe0f fix \u{1f468}\u200d\u{1f4bb}"', ctx);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(mockFlash).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the text was typed when only restoring the foreground failed (it comes after Ctrl+V and Enter)", async () => {
+    mockFlash.mockReturnValueOnce({ ok: false, reason: "foreground_restore_failed" } as never);
+    const err = await act("echo hi\n", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/most likely been typed.*Read the terminal before any retry/);
+  });
+
+  it.each([["an NBSP", "rm\u00a0-rf x"], ["an ideographic space", "echo\u3000x"], ["a stray zero-width joiner", "rm -rf ./b\u200d/x"]])(
+    "does not ask about text with %s, which looks like something else", async (_what, text) => {
+      const { ctx, ask } = asking({ action: "accept", content: {} });
+      const err = await act(text, ctx).catch((e) => e);
+      expect(err?.callerDetail).toMatch(/control, bidirectional or zero-width/);
+      expect(ask).not.toHaveBeenCalled();
+    });
+
+  // win2 on 8587774d: the act always carries the handle discover resolved, so a check on "no handle"
+  // never ran and the paste landed in the upper of two same-titled windows. Both cells aim by handle.
+  const actByHandle = (text: string, ctx: AskContext | null) =>
+    runWithAskContext(ctx, () => createDesktopExecutor({ windowTitle: "PowerShell", hwnd: String(WT) })(terminalInput, "type", text));
+
+  it("says where the terminal is when another window wears its title (#764, win2)", async () => {
+    state.twin = true;
+    state.twinRegion = { x: 800, y: 800, width: 100, height: 100 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await actByHandle("echo hi", ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ requestedSchema: { properties: { typeIt: { description: string } } } }])[0];
+    expect(form.requestedSchema.properties.typeIt.description)
+      .toBe("Into: PowerShell (its selected tab), at the upper left of the screen (2 windows have this title) — Types: echo hi");
+    expect(mockFlash).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask when another window wears its title in the same place (#764, win2)", async () => {
+    state.twin = true;
+    state.twinRegion = { x: 10, y: 10, width: 100, height: 100 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await actByHandle("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/sits in the same place on screen \(at the upper left of the screen\)/);
+    expect(ask).not.toHaveBeenCalled();
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("does not ask when a same-titled window cascades over it, though the thirds give them different words (gate 2)", async () => {
+    state.twin = true;
+    // The terminal's centre (50,50) is in the left third; this one's (370,60) is in the middle third,
+    // and it covers 72% of the terminal.
+    state.twinRegion = { x: 20, y: 10, width: 700, height: 100 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await actByHandle("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/sits in the same place on screen/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("asks when the terminal is maximized and a same-titled window sits inside it: \"maximized\" tells them apart", async () => {
+    state.twin = true;
+    state.maximized = true;
+    state.twinRegion = { x: 400, y: 400, width: 200, height: 200 };
+    state.twinFirst = true;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await actByHandle("echo hi", ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ requestedSchema: { properties: { typeIt: { description: string } } } }])[0];
+    expect(form.requestedSchema.properties.typeIt.description)
+      .toBe("Into: PowerShell (its selected tab), maximized on the screen (2 windows have this title) — Types: echo hi");
+  });
+
+  it("refuses, as nothing typed, when the monitors cannot be read to say which window it is", async () => {
+    state.twin = true;
+    state.twinRegion = { x: 800, y: 800, width: 100, height: 100 };
+    state.monitorsThrow = true;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await actByHandle("echo hi", ctx).catch((e) => e);
+    expect(err?.name).toBe("TerminalForegroundRefusal");
+    expect(err?.callerDetail).toMatch(/monitors could not be read/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not ask when the terminal is behind a maximized window with its title: the user sees only that one (gate 2)", async () => {
+    state.twin = true;
+    state.twinFirst = true;
+    state.twinMaximized = true;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await actByHandle("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/sits in the same place on screen/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("asks when a maximized window with its title is behind the terminal: the terminal is seen in front (gate 2)", async () => {
+    state.twin = true;
+    state.twinMaximized = true;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await actByHandle("echo hi", ctx);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(mockFlash).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts the whole line in UTF-16 units, so emoji do not stretch it past what was measured (gate 2)", async () => {
+    // "Into: PowerShell (its selected tab) — Types: " is 46 units; 300 astral emoji are 300 code points, 600 units.
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await actByHandle("\u{1f600}".repeat(300), ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/question's line .* is longer than it can show in full/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not ask when the whole line, not the text alone, is longer than the question shows in full (PR codex)", async () => {
+    state.title = "t".repeat(150);
+    state.tab = { name: "b".repeat(150), runtimeId: "42.1.4.263", paneCount: 1 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    // 400 characters of text is under the text limit (600); with the title and tab, the line is not.
+    const err = await actByHandle(`echo ${"a".repeat(395)}`, ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/question's line .* is longer than it can show in full \(600 characters\)/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not count a cloaked window with the terminal's title: the user cannot see it (win2 Y2)", async () => {
+    state.twin = true;
+    state.twinCloaked = true;
+    state.twinRegion = { x: 10, y: 10, width: 100, height: 100 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await actByHandle("echo hi", ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ requestedSchema: { properties: { typeIt: { description: string } } } }])[0];
+    expect(form.requestedSchema.properties.typeIt.description).toBe("Into: PowerShell (its selected tab) — Types: echo hi");
+  });
+
+  it("refuses when a window with the terminal's title opens while the user answers", async () => {
+    state.twinRegion = { x: 800, y: 800, width: 100, height: 100 };
+    const ask = vi.fn(async () => { state.twin = true; return { action: "accept" as const, content: {} }; });
+    const err = await actByHandle("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/where the question said it was no longer holds/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the same-titled window moves to where the question said the terminal was", async () => {
+    state.twin = true;
+    state.twinRegion = { x: 800, y: 800, width: 100, height: 100 };
+    const ask = vi.fn(async () => { state.twinRegion = { x: 10, y: 10, width: 100, height: 100 }; return { action: "accept" as const, content: {} }; });
+    const err = await actByHandle("echo hi", { ask } as AskContext).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/sits in the same place on screen/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+
+  it("names the tab when it differs from the window title (a fixed-title WT window, PR codex)", async () => {
+    state.tab = { name: "build", runtimeId: "42.1.4.263", paneCount: 1 };
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act("echo hi", ctx);
+    const form = (ask.mock.calls[0] as unknown as [{ requestedSchema: { properties: { typeIt: { description: string } } } }])[0];
+    expect(form.requestedSchema.properties.typeIt.description).toBe("Into: PowerShell (selected tab: build) — Types: echo hi");
+  });
+
+  it("says the terminal was left in front, and typing unknown, after SendInput failed (PR codex)", async () => {
+    mockFlash.mockReturnValueOnce({ ok: false, reason: "send_input_failed" } as never);
+    const err = await act("echo hi", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/send_input_failed\); whether anything was typed is not known, and the terminal was left in front/);
+  });
+
+  it("says the terminal was left in front after a focus-wait timeout", async () => {
+    mockFlash.mockReturnValueOnce({ ok: false, reason: "focus_wait_timeout" } as never);
+    const err = await act("echo hi", asking({ action: "accept", content: {} }).ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/Nothing was typed \(focus_wait_timeout\), but the terminal was brought in front and left there/);
+  });
+
+  it("asks about skin-toned emoji joined by a zero-width joiner (gate 2)", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act('git commit -m "\u{1f469}\u{1f3fd}\u200d\u{1f4bb} \u{1f3c3}\u{1f3fb}\u200d\u2640\ufe0f"', ctx);
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask about a minimized terminal: the flash does not restore it (gate 2)", async () => {
+    state.minimized = true;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/minimized/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not ask when this build has no native foreground paste (gate 2)", async () => {
+    native.hasFlash = false;
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/no foreground paste/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not ask about a variation selector that follows no emoji (file\\ufe0f looks like file; PR codex)", async () => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act("cat file\ufe0f", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/control, bidirectional or zero-width/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("does not paste when the call was cancelled during the emergency-stop check (PR codex)", async () => {
+    let cancelled = false;
+    const failsafeMod = await import("../../src/utils/failsafe.js");
+    vi.mocked(failsafeMod.checkFailsafe).mockImplementationOnce(async () => { cancelled = true; });
+    const ctx: AskContext = { ask: vi.fn(async () => ({ action: "accept" as const, content: {} })), cancelled: () => cancelled };
+    const err = await act("echo hi", ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/cancelled after the user answered/);
+    expect(mockFlash).not.toHaveBeenCalled();
+  });
+});
+
+describe("placeOnScreen — the words the question uses to tell two same-titled windows apart", () => {
+  const mon = (x: number, primary: boolean) => ({ primary, bounds: { x, y: 0, width: 900, height: 900 } });
+  const win = (x: number, y: number, extra: Partial<{ isMinimized: boolean; isMaximized: boolean }> = {}) =>
+    ({ region: { x, y, width: 100, height: 100 }, isMinimized: false, isMaximized: false, ...extra });
+
+  it.each([
+    [win(0, 0), "at the upper left of the screen"],
+    [win(400, 0), "at the top of the screen"],
+    [win(800, 400), "at the right of the screen"],
+    [win(400, 400), "at the centre of the screen"],
+    [win(800, 800), "at the lower right of the screen"],
+    [win(0, 0, { isMaximized: true }), "maximized on the screen"],
+    [win(0, 0, { isMinimized: true }), "minimized"],
+  ])("one monitor: %o → %s", async (w, words) => {
+    const { placeOnScreen } = await import("../../src/tools/desktop-executor.js");
+    expect(placeOnScreen(w, [mon(0, true)])).toBe(words);
+  });
+
+  it("names the monitor by where it sits from the main one, only when there are several", async () => {
+    const { placeOnScreen } = await import("../../src/tools/desktop-executor.js");
+    const two = [mon(0, true), mon(-900, false)];
+    expect(placeOnScreen(win(0, 0), two)).toBe("at the upper left of the main monitor");
+    expect(placeOnScreen(win(-900, 0), two)).toBe("at the upper left of the left monitor");
+    expect(placeOnScreen(win(-900, 0, { isMaximized: true }), two)).toBe("maximized on the left monitor");
+  });
+});

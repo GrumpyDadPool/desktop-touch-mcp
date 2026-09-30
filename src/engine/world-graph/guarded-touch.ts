@@ -59,6 +59,7 @@ export type TouchFailReason =
   | "aim_blocked_by_excluded_window"
   | "aim_route_failed"
   | "keyboard_target_unsafe"
+  | "foreground_not_allowed"
   | "window_excluded"
   | "action_not_offered"
   | "value_not_applied"
@@ -878,6 +879,12 @@ export class GuardedTouchLoop {
       // is a foreground type: the characters would go to the control this refused.
       if (err instanceof Error && err.name === "KeyboardTargetUnsafeError") {
         return { ok: false, reason: "keyboard_target_unsafe", diff: [], ...(detail !== undefined && { detail }) };
+      }
+      // internal #227: Windows Terminal takes input only through the foreground, and the user did not
+      // allow it (or could not be asked, or the paste could not be made, or failed). Its own reason:
+      // `executor_failed` advises typing through the foreground, which works around the user's no.
+      if (err instanceof Error && err.name === "TerminalForegroundRefusal") {
+        return { ok: false, reason: "foreground_not_allowed", diff: [], ...(detail !== undefined && { detail }) };
       }
       // ADR-036 item 16 — UIA says the element is gone, and the press where it was is refused. The
       // fact the lease check reports when the entity is missing from the live view, found one step

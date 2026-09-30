@@ -78,6 +78,7 @@ import { SERVER_VERSION } from "./version.js";
 import { resolveV2Activation } from "./tools/desktop-activation.js";
 import { uiPatternStore } from "./store/ui-pattern-store.js";
 import { macroOutcomeStore } from "./store/macro-outcome-store.js";
+import { runWithAskContext, type AskContext, type AskAnswer } from "./tools/_ask-user.js";
 
 // Resolve assets/icons directory (works both in dev: dist/ and release: dist/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -112,7 +113,55 @@ const _desktopV2 = _v2Enabled
 // ─── MCP server factory ───────────────────────────────────────────────────────
 // Returns a fully-configured McpServer with all tools registered.
 // Called once for STDIO mode, and once per HTTP request for stateless HTTP mode.
-function createMcpServer(): McpServer {
+/**
+ * internal #227 — every tool call runs with a way to ask the user (MCP elicitation), or with
+ * `null` when this transport cannot carry a request to the client. The handler is the LAST
+ * argument; a tool without an input schema is called with `extra` alone, so the arguments are
+ * passed through as they come and `extra` is the last of them.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapHandlerArgWithAsk(toolArgs: any[], s: McpServer, canAsk: boolean): any[] {
+  const last = toolArgs.length - 1;
+  const handler = toolArgs[last];
+  if (typeof handler !== "function") return toolArgs;
+  const wrapped = (...handlerArgs: unknown[]) => {
+    const extra = handlerArgs[handlerArgs.length - 1] as
+      | { requestId?: string | number; signal?: AbortSignal }
+      | undefined;
+    const ctx: AskContext | null = canAsk
+      ? {
+          ask: async (form, timeoutMs) => {
+            let answer;
+            try {
+              answer = await s.server.elicitInput(
+              // The form is built in `_ask-user.ts` to the SDK's primitive-field schema.
+              { mode: "form", ...form } as Parameters<typeof s.server.elicitInput>[0],
+              {
+                timeout: timeoutMs,
+                // A tool call the client cancels takes its question with it: an Accept that
+                // arrives afterwards must not act for a turn that is over (gate 2 on #764).
+                ...(extra?.signal && { signal: extra.signal }),
+                ...(extra?.requestId !== undefined && { relatedRequestId: extra.requestId }),
+              },
+              );
+            } catch (err) {
+              // An abort rejects with the client's own reason, whatever its words: said as a cancel by
+              // the signal, not guessed from the text (gate 2 on #764).
+              if (extra?.signal?.aborted) throw new Error("The tool call was cancelled while the question was up", { cause: err });
+              throw err;
+            }
+            if (extra?.signal?.aborted) throw new Error("The tool call was cancelled while the question was up");
+            return answer as AskAnswer;
+          },
+          cancelled: () => extra?.signal?.aborted === true,
+        }
+      : null;
+    return runWithAskContext(ctx, () => handler(...handlerArgs));
+  };
+  return [...toolArgs.slice(0, last), wrapped];
+}
+
+function createMcpServer(opts: { canAsk: boolean }): McpServer {
   const s = new McpServer(
     { name: "desktop-touch", version: SERVER_VERSION },
     {
@@ -146,6 +195,7 @@ function createMcpServer(): McpServer {
         "  aim_route_failed → the route to the window this act named by handle failed (UIA for a click; UIA setValue and the background write for type/setValue) — or, on a window named by title, the native UIA engine reported disabled the element this act was for and its window does not take input — and the act was NOT finished as a coordinate press; nothing was clicked or typed. if_unexpected.detail names the failure when this server recognises it — not found, no pattern for this action, disabled, or read-only. When it says not found or names none: re-call desktop_discover, or try click_element(name=…) which re-resolves the element. For the others, trying the same element again gives the same answer until its state changes — unless the route matched another element by the same text, which click_element(name=…, controlType=…) narrows. Do NOT press the entity's rect — a coordinate is aimed at no window;",
         "  keyboard_target_unsafe → the background write would not have reached the field this act named — the focus is on a different control or in a different window, the receiving control does not take typed text, or the field — or its window — is disabled — so nothing was typed. For disabled, answer or wait out whatever disabled it, then re-call desktop_discover — it does not list a disabled field, so missing there means still disabled; clicking it does not help. For read_only on the field you named, that field does not take text — typing again will not change it; name the field that does. Otherwise put the focus on the field you named, then type again — if_unexpected.detail names the ground and the way back for the road this act took: on a window named by title, desktop_act(action='click') on the same entity does it; on a window named by handle no route here focuses a text field yet, so re-call desktop_discover by the window's title and click it from there (a common dialog's title resolves to a handle as well, so that road does not open there). For other_window, bring the field's window forward first (focus_window) — it comes forward with the focus it last had, and the window holding the focus is usually over the field, which makes a click answer aim_occluded; do NOT type through the foreground instead, whatever holds the focus would take the characters. " +
           landingAdvice(LANDING_ADVICE_SERVER_INSTRUCTIONS),
+        "  foreground_not_allowed → a type into Windows Terminal needs the foreground, and it was not allowed — the user declined, dismissed or did not answer the question, this client cannot ask, the terminal is the window in front, split into panes, not a terminal tab, on another virtual desktop, closed, or changed or unreadable while the user answered, the text or title cannot be shown in full, or the paste itself failed; if_unexpected.detail says which, and whether anything was typed. Do NOT type into the terminal another way after a no; ask in the conversation first;",
         "  aim_blocked_by_excluded_window → a window this server may not act through is over the point, so nothing was done; the window this act named is NOT the excluded one and is still actionable. Use click_element, which does not use coordinates, or retry once the point is clear — do NOT retry by coordinate, and note that nothing in the response describes the window in the way;",
         "  action_not_offered → the target does not offer the action this act named, and NOTHING WAS DONE — no road was taken, so this is not a failed executor. Ask for the action you mean: desktop_act(action='click') or action='invoke' presses it. The entity's affordances in the desktop_discover response say which actions it offers, and action='auto' picks one of them. No provider here advertises 'select', so a select on any target is this refusal — reach a list or combo box by clicking the item you want. A type or setValue on a control UI Automation reports as a button, check box, radio button, hyperlink or menu item is this refusal too: none of them takes text, and nothing was typed;",
         "  value_not_applied → a type or setValue went through the native UI Automation client to a control that is not a text field (not Edit or Document), the control said yes, and its value read back unchanged for a moment after the write; nothing else was tried. Do not retry it or type into the same control another way (on a WinForms NumericUpDown a keystroke landed at its caret); re-call desktop_discover and check the field before writing again;",
@@ -227,8 +277,12 @@ function createMcpServer(): McpServer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (s as any).tool = function (...toolArgs: any[]) {
     return _originalTool(
-      ...wrapHandlerArgWithCallId(
-        wrapHandlerArgWithTiming(wrapHandlerArg(toolArgs, checkFailsafe)),
+      ...wrapHandlerArgWithAsk(
+        wrapHandlerArgWithCallId(
+          wrapHandlerArgWithTiming(wrapHandlerArg(toolArgs, checkFailsafe)),
+        ),
+        s,
+        opts.canAsk,
       ),
     );
   };
@@ -238,8 +292,12 @@ function createMcpServer(): McpServer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (s as any).registerTool = function (...toolArgs: any[]) {
     return _originalRegisterTool(
-      ...wrapHandlerArgWithCallId(
-        wrapHandlerArgWithTiming(wrapHandlerArg(toolArgs, checkFailsafe)),
+      ...wrapHandlerArgWithAsk(
+        wrapHandlerArgWithCallId(
+          wrapHandlerArgWithTiming(wrapHandlerArg(toolArgs, checkFailsafe)),
+        ),
+        s,
+        opts.canAsk,
       ),
     );
   };
@@ -673,7 +731,8 @@ if (useHttp) {
       // label.
       recordRpcReceived("http");
       wakePerceptionRuntime();
-      const reqServer = createMcpServer();
+      // internal #227: JSON-response mode has no stream to carry a question to the client.
+      const reqServer = createMcpServer({ canAsk: false });
       // Stateless mode (`sessionIdGenerator: undefined`):
       // per-request McpServer 構造 (上の comment 参照) と SDK の stateful 設計
       // (sessionIdGenerator が UUID 発行する mode) は両立不能 — stateful mode は
@@ -722,7 +781,7 @@ if (useHttp) {
     console.error(`[desktop-touch] MCP server running (http) on ${httpUrl}`);
   });
 } else {
-  const server = createMcpServer();
+  const server = createMcpServer({ canAsk: true });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 

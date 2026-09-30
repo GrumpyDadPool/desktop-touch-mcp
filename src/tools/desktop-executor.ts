@@ -4,7 +4,8 @@
  * Priority order:
  *   1. uia      → clickElement / setElementValue (UIA Invoke/ValuePattern)
  *   2. cdp      → CDP click via screen coords / evaluateInTab fill
- *   3. terminal → background WM_CHAR injection (no focus steal); explicit fail if unsupported
+ *   3. terminal → background WM_CHAR injection (no focus steal); for Windows Terminal, which takes no
+ *                 posted characters, a foreground paste after asking the user (internal #227)
  *   4. mouse    → mouse click at entity rect center (visual-only fallback)
  *
  * All deps are injectable so tests can mock every route without OS bindings.
@@ -20,6 +21,8 @@
 
 import type { UiEntity, ExecutorKind, ExecutorOutcome } from "../engine/world-graph/types.js";
 import { logResolve, logDispatchSink } from "./_resolve-log.js";
+import { askToTakeForeground, foregroundDescription, callWasCancelled, ASK_TIMEOUT_MS, ASK_TEXT_SHOWN_MAX, ASK_TITLE_SHOWN_MAX, ASK_DESCRIPTION_SHOWN_MAX, type ForegroundRefusal } from "./_ask-user.js";
+import { offDesktopTarget } from "./_off-desktop.js";
 import type { TouchAction } from "../engine/world-graph/guarded-touch.js";
 import { assertCoordinateReachable } from "../engine/reachable-bounds.js";
 import { classifyUiaRouteFailure, describeUiaRouteFailure } from "../engine/uia-route-failure.js";
@@ -264,6 +267,406 @@ export interface ElementAtPoint {
 // ── G2: Background terminal send — injectable for testing ─────────────────────
 
 /**
+ * The window does not take posted characters. Carries the reason, so the production send can tell
+ * Windows Terminal (`wt_xaml_pipeline`, internal #227) from a window no route here can type into.
+ */
+export class BackgroundTerminalUnsupportedError extends Error {
+  constructor(message: string, readonly hwnd: unknown, readonly reason: string | undefined) {
+    super(message);
+    this.name = "BackgroundTerminalUnsupportedError";
+  }
+}
+
+/** A refusal whose sentence reaches the caller as `detail` (`guarded-touch.ts` reads `callerDetail`). */
+class TerminalForegroundRefusal extends Error {
+  constructor(readonly callerDetail: string) {
+    super(callerDetail);
+    this.name = "TerminalForegroundRefusal";
+  }
+}
+
+const TERMINAL_FOREGROUND_REFUSALS: Record<ForegroundRefusal, string> = {
+  declined:
+    "Nothing was typed: Windows Terminal takes input only through the foreground, and the user " +
+    "declined. Do not type into it another way without asking the user.",
+  cancelled:
+    "Nothing was typed: Windows Terminal takes input only through the foreground, and the question " +
+    "was dismissed. Ask the user in the conversation before typing into it.",
+  timed_out:
+    "Nothing was typed: Windows Terminal takes input only through the foreground, and no one " +
+    `answered within ${ASK_TIMEOUT_MS / 1000} s. Ask the user in the conversation before typing into it; do not repeat the act.`,
+  cannot_ask:
+    "Nothing was typed: Windows Terminal takes input only through the foreground, and this client " +
+    // Not terminal(send, foreground_flash): that road has none of the checks here (window in front,
+    // tab, panes), so naming it would undo them (gate 2 on #764). There is no way to allow it unasked.
+    "cannot ask the user (it cannot show questions, or no one is there). Typing into Windows Terminal " +
+    "needs the user's answer; tell the user, who can type it themselves.",
+};
+
+/**
+ * internal #227 — type into Windows Terminal through the foreground, once the user has allowed it.
+ *
+ * WT's TerminalControl reads XAML key events, not posted WM_CHAR, so the background send cannot
+ * reach it (`wt_xaml_pipeline`). `terminal(send, method:'foreground_flash')` takes the foreground
+ * for a moment and pastes; this is the same road, taken only on the user's yes.
+ *
+ * What would make the paste refused is checked before asking, so the user is not asked for a paste
+ * that is then refused: the window must be on this virtual desktop (internal #221), and the text one
+ * line (a single trailing newline — `\n`, `\r\n` or `\r`, as terminal send reads it — becomes Enter)
+ * within the flash's size limit. The window is checked AGAIN after the answer: the question can wait
+ * up to two minutes (ASK_TIMEOUT_MS), and the user may have moved the terminal to another desktop or closed it meanwhile
+ * (gate 2 on #764).
+ */
+/**
+ * Where a window is, in the words a person uses to find it: "at the upper left of the main monitor",
+ * "maximized on the right monitor", "minimized". The screen is cut in thirds each way by the window's
+ * centre; the monitor is named only when there is more than one, by where it sits from the main one.
+ * Two windows given the same words cannot be told apart by them (the caller refuses then).
+ */
+export function placeOnScreen(
+  w: { region: { x: number; y: number; width: number; height: number }; isMinimized: boolean; isMaximized: boolean },
+  monitors: ReadonlyArray<{ primary: boolean; bounds: { x: number; y: number; width: number; height: number } }>,
+): string {
+  if (w.isMinimized) return "minimized";
+  const cx = w.region.x + w.region.width / 2;
+  const cy = w.region.y + w.region.height / 2;
+  const centre = (b: { x: number; y: number; width: number; height: number }) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+  const inside = (b: { x: number; y: number; width: number; height: number }) =>
+    cx >= b.x && cx < b.x + b.width && cy >= b.y && cy < b.y + b.height;
+  // The monitor holding the centre, else the nearest one (a window mostly off screen).
+  const mon = monitors.find((m) => inside(m.bounds)) ?? [...monitors].sort((a, b) => {
+    const da = centre(a.bounds), db = centre(b.bounds);
+    return Math.hypot(da.x - cx, da.y - cy) - Math.hypot(db.x - cx, db.y - cy);
+  })[0];
+  let monitorWords = "the screen";
+  if (monitors.length > 1 && mon) {
+    const main = monitors.find((m) => m.primary) ?? monitors[0]!;
+    if (mon === main) monitorWords = "the main monitor";
+    else {
+      const a = centre(main.bounds), b = centre(mon.bounds);
+      const dx = b.x - a.x, dy = b.y - a.y;
+      monitorWords = Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? "the left monitor" : "the right monitor") : (dy < 0 ? "the upper monitor" : "the lower monitor");
+    }
+  }
+  if (w.isMaximized) return `maximized on ${monitorWords}`;
+  if (!mon) return "somewhere off screen";
+  const b = mon.bounds;
+  const col = cx < b.x + b.width / 3 ? "left" : cx >= b.x + (2 * b.width) / 3 ? "right" : "";
+  const row = cy < b.y + b.height / 3 ? "top" : cy >= b.y + (2 * b.height) / 3 ? "bottom" : "";
+  const where = row && col ? `${row === "top" ? "upper" : "lower"} ${col}` : row || col || "centre";
+  return `at the ${where} of ${monitorWords}`;
+}
+
+/**
+ * A same-titled window (`a`) whose overlap with the terminal (`b`) covers half the smaller one or
+ * more. When only one is maximized, "maximized" tells them apart (gate 2 on 49e6c778) — unless the
+ * terminal is the other one and sits behind it, where the user cannot see it (gate 2 on 58043b90).
+ * `zOrder` 0 is frontmost.
+ */
+export function mostlyOverlap(
+  a: { region: { x: number; y: number; width: number; height: number }; isMinimized: boolean; isMaximized: boolean; zOrder: number },
+  b: { region: { x: number; y: number; width: number; height: number }; isMinimized: boolean; isMaximized: boolean; zOrder: number },
+): boolean {
+  if (a.isMinimized || b.isMinimized) return false;
+  if (a.isMaximized !== b.isMaximized && !(a.isMaximized && b.zOrder > a.zOrder)) return false;
+  const w = Math.min(a.region.x + a.region.width, b.region.x + b.region.width) - Math.max(a.region.x, b.region.x);
+  const h = Math.min(a.region.y + a.region.height, b.region.y + b.region.height) - Math.max(a.region.y, b.region.y);
+  if (w <= 0 || h <= 0) return false;
+  const smaller = Math.min(a.region.width * a.region.height, b.region.width * b.region.height);
+  return smaller > 0 && w * h * 2 >= smaller;
+}
+
+export async function pasteIntoTerminalThroughForeground(hwnd: bigint, text: string): Promise<void> {
+  const { enumWindowsInZOrder, enumMonitors, getWindowIdentity, getForegroundHwnd, getWindowRoot } = await import("../engine/win32.js");
+  const { injectViaForegroundFlash } = await import("../engine/bg-input.js");
+  const { nativeWin32 } = await import("../engine/native-engine.js");
+  // Checked before asking: without the native flash, the user would be asked for nothing (gate 2 on #764).
+  if (typeof nativeWin32?.win32ForegroundFlashInject !== "function") {
+    throw new TerminalForegroundRefusal(
+      "Nothing was typed: this build's native addon has no foreground paste (win32ForegroundFlashInject). Rebuild it (npm run build:rs).",
+    );
+  }
+  const { resolveBackgroundInputChannel } = await import("../engine/background-channel-resolver.js");
+
+  const trailing = /(?:\r\n|\r|\n)$/.exec(text);
+  const line = trailing ? text.slice(0, trailing.index) : text;
+  if (/[\r\n]/.test(line)) {
+    throw new TerminalForegroundRefusal(
+      "Nothing was typed: Windows Terminal takes input only through a one-line paste, and the text " +
+      "has more than one line. Send one line per act.",
+    );
+  }
+  /**
+   * The process behind the handle when the user was asked. A window that closed during the wait can
+   * leave its handle to another window, even another WT (PR codex P1 on #764), so the answer is
+   * held to the same process: same pid, same start time.
+   */
+  let askedAbout: { pid: number; processStartTimeMs: number } | undefined;
+  let asked = false;
+  /**
+   * Where the terminal was on screen when the user was asked, said only when another window wears the
+   * same title: the question shows the title, and two same-titled windows would look alike (win2
+   * measured the paste landing in the upper of two, #764; the user chose to say where rather than
+   * refuse). Held to after the answer, since the user found the window by it.
+   */
+  let askedPlace: string | undefined;
+  let placeRead = false;
+  /**
+   * The terminal must not be the window in front. While the user answers, the window in front is
+   * the one showing the question; when that is this terminal, the tab selected is the one the user
+   * is working in — Claude Code's own, when it runs in another tab of this window, and the paste and
+   * Enter arrive as the user's next message (win2 measured exactly that, #764 P1-2). A terminal in
+   * another window, or a client in another app, is not in front.
+   */
+  const isInFront = (): boolean => {
+    // Fails closed, as every other check here does: a foreground that cannot be read (no native
+    // binding, or none during a focus change) counts as this terminal (gate 2 on #764).
+    try {
+      const fg = getForegroundHwnd();
+      return fg === null || fg === hwnd || getWindowRoot(fg) === hwnd;
+    } catch {
+      return true;
+    }
+  };
+  const refuseInFront = (): never => {
+    throw new TerminalForegroundRefusal(
+      "Nothing was typed: this terminal is the window in front, where the user is working. If the client " +
+      "runs in another window, the user can switch back to it and the act can be tried once more; if it " +
+      "runs in a tab of this window, the paste would arrive there — the user can move that tab to a new " +
+      "window (right-click the tab), or use a terminal in another window.",
+    );
+  };
+  /** Where the terminal is now, or the sentence that refuses it. */
+  const whereIsIt = async () => {
+    const wins = enumWindowsInZOrder();
+    const win = wins.find((w) => w.hwnd === hwnd);
+    if (!win) {
+      throw new TerminalForegroundRefusal("Nothing was typed: the terminal window is no longer open.");
+    }
+    // The flash does not restore a minimized window; the user would be asked for a paste that cannot
+    // land (gate 2 on #764).
+    if (win.isMinimized) {
+      throw new TerminalForegroundRefusal("Nothing was typed: the terminal window is minimized. Restore it, then try again.");
+    }
+    let who: { pid: number; processStartTimeMs: number } | undefined;
+    try { who = getWindowIdentity(hwnd); } catch { who = undefined; }
+    // `getWindowIdentity` answers pid 0 / start 0 when it cannot read, rather than throwing: two
+    // such reads would compare equal, so an unreadable identity is refused (PR codex on #764).
+    if (!who || who.pid === 0 || who.processStartTimeMs === 0) {
+      throw new TerminalForegroundRefusal(
+        "Nothing was typed: the terminal's process could not be identified, so the user's answer could not be held to it.",
+      );
+    }
+    if (!asked) {
+      asked = true;
+      askedAbout = who;
+    } else if (!askedAbout || who.pid !== askedAbout.pid || who.processStartTimeMs !== askedAbout.processStartTimeMs) {
+      throw new TerminalForegroundRefusal(
+        "Nothing was typed: the terminal window the user was asked about has closed, and its handle now names another window.",
+      );
+    }
+    if (await offDesktopTarget(win, wins, undefined)) {
+      throw new TerminalForegroundRefusal(
+        "Nothing was typed: the terminal is on another virtual desktop, and bringing it forward would " +
+        "switch the user's desktop.",
+      );
+    }
+    const channel = resolveBackgroundInputChannel(hwnd, { allowedChannels: ["clipboard_flash"] });
+    if (channel.kind !== "clipboard_flash") {
+      throw new TerminalForegroundRefusal(
+        `Nothing was typed: this terminal cannot be pasted into through the foreground (${channel.kind}).`,
+      );
+    }
+    // Only windows wearing exactly the title the question shows can be mistaken for it, and only ones
+    // the user can see: a cloaked window (another virtual desktop, a hidden UWP frame) was refused as
+    // "in the same place" with nothing to move, or counted in "2 windows" (win2 Y2/Y2b).
+    const twins = wins.filter((w) => w.hwnd !== hwnd && w.title === win.title && !w.isCloaked);
+    let place: string | undefined;
+    if (twins.length > 0) {
+      let monitors: ReturnType<typeof enumMonitors>;
+      try { monitors = enumMonitors(); } catch {
+        throw new TerminalForegroundRefusal(
+          `Nothing was typed: another window is titled "${win.title}", and the monitors could not be read to say which one this is.`,
+        );
+      }
+      place = placeOnScreen(win, monitors);
+      // Same words, or mostly on top of each other: cascaded windows a few pixels either side of a
+      // third get different words and still look like one place (gate 2 on 0c35f15e).
+      if (twins.some((t) => placeOnScreen(t, monitors) === place || mostlyOverlap(t, win))) {
+        throw new TerminalForegroundRefusal(
+          `Nothing was typed: another window is titled "${win.title}" and sits in the same place on screen ` +
+          `(${place}), so the question could not show which one it types into. Move one of them, or rename a tab.`,
+        );
+      }
+      place = `${place} (${twins.length + 1} windows have this title)`;
+    }
+    if (!placeRead) {
+      placeRead = true;
+      askedPlace = place;
+    } else if (place !== askedPlace) {
+      // Includes a twin that appeared or left: the question said, or did not say, where it was.
+      throw new TerminalForegroundRefusal(
+        "Nothing was typed: while the user was answering, the terminal moved or a window with its title " +
+        "opened, closed or moved, so where the question said it was no longer holds.",
+      );
+    }
+    return { ...channel, windowTitle: win.title, place };
+  };
+
+  const before = await whereIsIt();
+  if (isInFront()) refuseInFront();
+  // The flash measures UTF-16 bytes and refuses at the limit (`validate_input`), after the user said yes.
+  // Unreachable while ASK_TEXT_SHOWN_MAX (600) is below it; kept for the day that limit is raised.
+  if (line.length * 2 >= before.constraints.maxBytes) {
+    throw new TerminalForegroundRefusal(
+      `Nothing was typed: the text is longer than one paste into Windows Terminal takes ` +
+      `(${before.constraints.maxBytes} bytes of UTF-16). Send it in shorter pieces.`,
+    );
+  }
+  // Characters the question would show differently from what the shell receives — controls (TAB,
+  // ESC, …), bidi overrides, zero-width marks — would let the user agree to text they did not see
+  // (win2's Opus review on #764).
+  if (UNSHOWABLE.test(line)) {
+    throw new TerminalForegroundRefusal(
+      "Nothing was typed: the text has a control, bidirectional or zero-width character, which the question " +
+      "would not show as the terminal receives it. Send plain text.",
+    );
+  }
+  // The destination too is shown in full, so it is held to the same rules (PR codex on #764).
+  if (before.windowTitle.length > ASK_TITLE_SHOWN_MAX || UNSHOWABLE.test(before.windowTitle)) {
+    throw new TerminalForegroundRefusal(
+      `Nothing was typed: the terminal's title cannot be shown in full in the question (longer than ${ASK_TITLE_SHOWN_MAX} ` +
+      "characters, or it has a control, bidirectional or zero-width character), and the user is not asked to agree to a destination they cannot read.",
+    );
+  }
+  if (line.length > ASK_TEXT_SHOWN_MAX) {
+    throw new TerminalForegroundRefusal(
+      `Nothing was typed: the text is longer than the question can show in full (${ASK_TEXT_SHOWN_MAX} ` +
+      "characters), and the user is not asked to agree to text they cannot read. Send it in shorter pieces.",
+    );
+  }
+  // The tab the user is agreeing to: a WT window's tabs share its process and, when same-titled, its
+  // title, so only the selected tab's RuntimeId tells them apart (win2; PR codex on #764).
+  const { getSelectedTab } = await import("../engine/uia-bridge.js");
+  const tabBefore = await getSelectedTab(hwnd);
+  // A tab that cannot be read, or a window that shows none, cannot be held to (PR codex on #764):
+  // two absent identities would compare equal, and a replacement window with no tab would pass.
+  if (!tabBefore) {
+    throw new TerminalForegroundRefusal(
+      "Nothing was typed: the terminal's active tab could not be read, so the user's answer could not be held to it.",
+    );
+  }
+  // Exactly one pane. A split tab: which pane takes the paste can be read only while WT is in front,
+  // and it is not while the user answers (win2, #764). No pane: the tab is not a terminal (WT's
+  // Settings tab), and the paste and Enter would go to whatever control it has (gate 2 on #764).
+  const refuseSplit = (panes: number): never => {
+    throw new TerminalForegroundRefusal(
+      panes > 1
+        ? "Nothing was typed: the terminal's tab is split into panes, and which pane would receive the text " +
+          "cannot be read while the user answers. Use a tab that is not split."
+        : "Nothing was typed: the selected tab is not a terminal (no terminal pane, e.g. WT's Settings tab). " +
+          "Select a terminal tab.",
+    );
+  };
+  if (tabBefore.paneCount !== 1) refuseSplit(tabBefore.paneCount);
+  // The tab's own name too: a WT window with a fixed title shows the same title for every tab
+  // (PR codex on #764). Held to the same rules as the title, since it is shown.
+  if (tabBefore.name.length > ASK_TITLE_SHOWN_MAX || UNSHOWABLE.test(tabBefore.name)) {
+    throw new TerminalForegroundRefusal(
+      "Nothing was typed: the terminal's tab name cannot be shown in full in the question, and the user is not asked to agree to a destination they cannot read.",
+    );
+  }
+  const shown = { windowTitle: before.windowTitle, tabName: tabBefore.name, place: before.place, text: line, pressEnter: trailing !== null };
+  // The line as a whole, not the text alone: title, tab and place share it (PR codex on #764).
+  // UTF-16 units, as the text check above: never fewer than code points, so an emoji-heavy line is not
+  // let past a limit win2 measured in plain characters (gate 2 on 58043b90).
+  if (foregroundDescription(shown).length > ASK_DESCRIPTION_SHOWN_MAX) {
+    throw new TerminalForegroundRefusal(
+      `Nothing was typed: the question's line (the text with the terminal's title, tab and place) is longer than it can show in full ` +
+      `(${ASK_DESCRIPTION_SHOWN_MAX} characters), and the user is not asked to agree to what they cannot read. Send shorter text.`,
+    );
+  }
+  const answer = await askToTakeForeground(shown);
+  if (!answer.allowed) throw new TerminalForegroundRefusal(TERMINAL_FOREGROUND_REFUSALS[answer.why]);
+  const channel = await whereIsIt();
+  // The window's title is NOT compared: WT takes it from the active tab, and a prompt or a running
+  // program retitles the tab by itself, which refused every such Accept. A switched tab, and a
+  // handle reused by another WT window, both change the selected tab's RuntimeId, which is compared
+  // below (gate 2 on #764).
+  const tabAfter = await getSelectedTab(hwnd);
+  if (tabAfter && tabAfter.paneCount !== 1) refuseSplit(tabAfter.paneCount);
+  if (!tabAfter || tabAfter.runtimeId !== tabBefore.runtimeId) {
+    throw new TerminalForegroundRefusal(
+      "Nothing was typed: the terminal's active tab changed while the user was answering" +
+      (!tabAfter ? " (or could not be read again)" : "") +
+      `; the user agreed to the tab "${tabBefore.name}".`,
+    );
+  }
+  // The emergency stop is checked when the call starts; the paste can come up to two minutes later,
+  // and it takes the foreground, so it is checked again (gate 2 on #764). Throws FailsafeError.
+  // Kept a refusal: as executor_failed, its advice would be to type another way (gate 2 on #764).
+  const { checkFailsafe } = await import("../utils/failsafe.js");
+  try {
+    await checkFailsafe("per-tool");
+  } catch (e) {
+    throw new TerminalForegroundRefusal(
+      `Nothing was typed: the emergency stop was triggered (${e instanceof Error ? e.name : "FailsafeError"}). Stop.`,
+    );
+  }
+  // After the last await, so a cancel during the failsafe check is not missed (PR codex on #764).
+  if (callWasCancelled()) {
+    throw new TerminalForegroundRefusal("Nothing was typed: the tool call was cancelled after the user answered.");
+  }
+  // Last, after every await: the user may have brought the terminal in front while the tab was
+  // being read, and the flash would then paste into it without taking or restoring anything
+  // (PR codex on #764). Nothing awaits between here and the paste.
+  if (isInFront()) refuseInFront();
+
+  logDispatchSink({ sink: "foreground_flash", tool: "desktop_act:terminal_send", targetHwnd: channel.hwnd });
+  const r = injectViaForegroundFlash(channel.hwnd, channel.pid, line, { pressEnter: trailing !== null });
+  if (!r.ok) {
+    // These fail before Ctrl+V is sent (`foreground_flash.rs`: validate, save the clipboard, take
+    // the foreground, wait for focus, then paste); the rest may have typed. Refused, not
+    // `executor_failed`: that code's advice is to type through the foreground, which would run the
+    // command a second time if the paste did land (gate 2 on #764).
+    const nothingTyped = r.reason === "input_contains_newline" ||
+      r.reason === "input_exceeds_paste_warning_threshold" ||
+      r.reason === "clipboard_lock_contention" ||
+      r.reason === "foreground_steal_denied" ||
+      r.reason === "focus_wait_timeout";
+    // Restoring the foreground comes last, after Ctrl+V and Enter — but the paste may have been caught
+    // by WT's paste warning, which the flash reports only when the restore succeeds (PR codex on
+    // #764). So: probably typed, not certainly. A focus-wait timeout returns after the terminal was brought forward and before
+    // the restore, so nothing was typed but the terminal is left in front (PR codex on #764).
+    if (r.reason === "focus_wait_timeout") {
+      throw new TerminalForegroundRefusal(
+        "Nothing was typed (focus_wait_timeout), but the terminal was brought in front and left there; " +
+        "the window the user was in is behind it. Tell the user before anything else.",
+      );
+    }
+    // SendInput failing on Ctrl+V or Enter returns from the same place, before the restore
+    // (`foreground_flash.rs` steps 6 and 8), so the terminal is left in front too (PR codex on #764).
+    if (r.reason === "send_input_failed") {
+      throw new TerminalForegroundRefusal(
+        "The paste through the foreground failed (send_input_failed); whether anything was typed is not known, " +
+        "and the terminal was left in front, with the window the user was in behind it. Tell the user, and " +
+        "read the terminal before any retry.",
+      );
+    }
+    if (r.reason === "foreground_restore_failed") {
+      throw new TerminalForegroundRefusal(
+        "The paste was sent" + (trailing !== null ? " with Enter" : "") + " and has most likely been typed, but the " +
+        "previous window could not be put back in front (foreground_restore_failed). Read the terminal before any retry: typing it again may run it twice.",
+      );
+    }
+    throw new TerminalForegroundRefusal(
+      `The paste through the foreground failed (${r.reason ?? "unknown"}); ` +
+      (nothingTyped ? "nothing was typed." : "whether anything was typed is not known. Read the terminal before retrying."),
+    );
+  }
+}
+
+/**
  * Injectable deps for the background terminal send path.
  * Exported so unit tests can exercise the routing logic without OS bindings.
  */
@@ -284,7 +687,8 @@ export interface TerminalBgDeps {
  *   - Background injection not supported (Chromium, UWP, etc.)
  *   - Send incomplete (partial write)
  *
- * Never falls back to foreground focus-steal (G2 contract).
+ * Never takes the foreground itself (G2 contract). Its production caller does, for Windows Terminal
+ * only and only with the user's permission (`pasteIntoTerminalThroughForeground`, internal #227).
  */
 export function terminalBgExecute(
   windowTitle: string,
@@ -296,10 +700,12 @@ export function terminalBgExecute(
 
   const check = deps.canBgSend(win.hwnd);
   if (!check.supported) {
-    throw new Error(
+    throw new BackgroundTerminalUnsupportedError(
       `Background terminal send not supported for "${windowTitle}" ` +
       `(${check.reason ?? "unknown"}, class: ${check.className ?? "?"}).` +
-      ` Use V1 terminal(action='send') as fallback.`
+      ` Use V1 terminal(action='send') as fallback.`,
+      win.hwnd,
+      check.reason,
     );
   }
 
@@ -310,6 +716,26 @@ export function terminalBgExecute(
     );
   }
 }
+
+/**
+ * Characters the question would show differently from what the shell receives — controls (TAB,
+ * ESC, …), bidi overrides, zero-width marks.
+ */
+// Also look-alike spaces (NBSP, the U+2000 set, ideographic space: shown as a space, not split on by
+// the shell), soft hyphen, combining grapheme joiner, Arabic letter mark, Hangul fillers, Mongolian and
+// Khmer invisibles, line/paragraph separators, variation selectors, Unicode tags (gate 2 on #764).
+// Not the zero-width joiner (U+200D) or VS16 (U+FE0F): emoji are made of them (👨‍💻, ✔️), and prompt
+// titles and commit messages carry emoji; both show as part of the emoji they belong to.
+const UNSHOWABLE_CHARS =
+  // eslint-disable-next-line no-control-regex, no-misleading-character-class -- matching these characters is the point
+  /[\u0000-\u001f\u007f-\u009f\u00a0\u00ad\u034f\u061c\u115f\u1160\u1680\u17b4\u17b5\u180b-\u180f\u2000-\u200c\u200e\u200f\u2028-\u202f\u205f-\u206f\u3000\u3164\ufe00-\ufe0e\ufeff\uffa0\ufff0-\ufffb\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/u;
+/** A zero-width joiner not between two emoji: shown as nothing, received as a character. */
+// An emoji before the joiner may carry VS16 or a skin-tone modifier (👩🏽‍💻, 🏃🏻‍♀️; gate 2 on #764).
+// eslint-disable-next-line no-misleading-character-class -- the class lists modifiers on purpose
+const STRAY_ZWJ = /(?<!\p{Extended_Pictographic}[\ufe0f\u{1f3fb}-\u{1f3ff}]?)\u200d|\u200d(?!\p{Extended_Pictographic})/u;
+/** VS16 not after an emoji: shown as nothing, received as a character (`file\ufe0f`; PR codex on #764). */
+const STRAY_VS16 = /(?<!\p{Extended_Pictographic})\ufe0f/u;
+const UNSHOWABLE = { test: (s: string): boolean => UNSHOWABLE_CHARS.test(s) || STRAY_ZWJ.test(s) || STRAY_VS16.test(s) };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -2668,77 +3094,86 @@ function getSharedRealDeps(): ExecutorDeps {
     },
 
     async terminalSend(windowTitle, text, hwnd) {
-      // G2: Background WM_CHAR path — no focus steal.
-      // canInjectViaPostMessage() gates supported terminals (Windows Terminal, conhost).
-      // Unsupported windows (Chromium, UWP) throw explicitly — caller gets executor_failed
-      // and the LLM description directs them to V1 terminal({action:'send'}) as fallback.
+      // G2: Background WM_CHAR path — no focus steal. canInjectViaPostMessage() gates it. Windows
+      // Terminal (wt_xaml_pipeline) takes no posted characters: it is pasted through the foreground
+      // after asking the user, and every refusal there is foreground_not_allowed (internal #227).
+      // Other unsupported windows (Chromium, UWP) throw — the caller gets executor_failed.
       const { enumWindowsInZOrder, isWindowGone: isWindowGoneSync } = await import("../engine/win32.js");
       const { canInjectViaPostMessage, postCharsToHwnd } = await import("../engine/bg-input.js");
       const wins = enumWindowsInZOrder();
-      terminalBgExecute(windowTitle, text, {
-        // ADR-035 Phase 1 — the same unfiltered, silently-first-match shape the
-        // v1 resolvers have, reached through `desktop_act` instead. Instrumented
-        // so the observation window covers BOTH public dispatchers; leaving it
-        // out would put a hole in the H2 evidence exactly where a v2 caller
-        // writes (Opus Round 2 P2).
-        findWindow: (title) => {
-          // ADR-036 — when the caller resolved a handle, this is no longer a lookup: the
-          // enumeration is consulted only to fetch that window's record, and a same-titled
-          // sibling cannot be returned instead. `pinnedByHwnd` keeps the ADR-035 evidence
-          // able to count the two shapes apart.
-          if (hwnd !== undefined) {
-            const named = wins.filter((w) => w.hwnd === hwnd);
+      try {
+        terminalBgExecute(windowTitle, text, {
+          // ADR-035 Phase 1 — the same unfiltered, silently-first-match shape the
+          // v1 resolvers have, reached through `desktop_act` instead. Instrumented
+          // so the observation window covers BOTH public dispatchers; leaving it
+          // out would put a hole in the H2 evidence exactly where a v2 caller
+          // writes (Opus Round 2 P2).
+          findWindow: (title) => {
+            // ADR-036 — when the caller resolved a handle, this is no longer a lookup: the
+            // enumeration is consulted only to fetch that window's record, and a same-titled
+            // sibling cannot be returned instead. `pinnedByHwnd` keeps the ADR-035 evidence
+            // able to count the two shapes apart.
+            if (hwnd !== undefined) {
+              const named = wins.filter((w) => w.hwnd === hwnd);
+              logResolve({
+                resolver: "desktopActTerminalSend",
+                query: title,
+                matches: named,
+                pinnedByHwnd: true,
+                identity: "lookup",
+                intent: "write",
+              });
+              // ADR-036 — a by-handle miss is ordinary (`enumWindowsInZOrder` drops untitled,
+              // sub-50 px and excluded windows), and the throw downstream only knows the title,
+              // so it named a window that is plainly on screen. Thrown here, AFTER the resolve
+              // is logged: an earlier pre-check said the same sentence but left the miss out of
+              // the H2 evidence, counting handle successes and not handle failures (2ゲート目).
+              if (!named[0]) {
+                // ADR-036 — and say WHICH kind of miss it is. A generic Error becomes
+                // `executor_failed`, whose published terminal recovery is "use V1
+                // terminal(action='send')" — a title-based road that can type into a same-titled
+                // sibling or into the replacement window. That advice is right for a window that
+                // is merely filtered out of the enumeration (untitled, sub-50 px, excluded) and
+                // wrong for one that has been destroyed, so the two stop sharing an answer
+                // (PR 側 codex の P1).
+                if (isWindowGoneSync(hwnd)) throw new AimedWindowGoneError(hwnd);
+                throw new Error(
+                  `Terminal window not found: hwnd ${hwnd} is not in the enumeration (title was "${title}")`,
+                );
+              }
+              return named[0];
+            }
+            const matches = wins.filter((w) => w.title.toLowerCase().includes(title.toLowerCase()));
             logResolve({
               resolver: "desktopActTerminalSend",
               query: title,
-              matches: named,
-              pinnedByHwnd: true,
+              matches,
               identity: "lookup",
               intent: "write",
             });
-            // ADR-036 — a by-handle miss is ordinary (`enumWindowsInZOrder` drops untitled,
-            // sub-50 px and excluded windows), and the throw downstream only knows the title,
-            // so it named a window that is plainly on screen. Thrown here, AFTER the resolve
-            // is logged: an earlier pre-check said the same sentence but left the miss out of
-            // the H2 evidence, counting handle successes and not handle failures (2ゲート目).
-            if (!named[0]) {
-              // ADR-036 — and say WHICH kind of miss it is. A generic Error becomes
-              // `executor_failed`, whose published terminal recovery is "use V1
-              // terminal(action='send')" — a title-based road that can type into a same-titled
-              // sibling or into the replacement window. That advice is right for a window that
-              // is merely filtered out of the enumeration (untitled, sub-50 px, excluded) and
-              // wrong for one that has been destroyed, so the two stop sharing an answer
-              // (PR 側 codex の P1).
-              if (isWindowGoneSync(hwnd)) throw new AimedWindowGoneError(hwnd);
-              throw new Error(
-                `Terminal window not found: hwnd ${hwnd} is not in the enumeration (title was "${title}")`,
-              );
-            }
-            return named[0];
-          }
-          const matches = wins.filter((w) => w.title.toLowerCase().includes(title.toLowerCase()));
-          logResolve({
-            resolver: "desktopActTerminalSend",
-            query: title,
-            matches,
-            identity: "lookup",
-            intent: "write",
-          });
-          return matches[0];
-        },
-        canBgSend:  (hwnd) => canInjectViaPostMessage(hwnd),
-        bgSend:     (hwnd, t) => {
-          // `TerminalBgDeps` types the handle as `unknown` (it is a test seam);
-          // the concrete value here is the `bigint` from the enumeration above.
-          logDispatchSink({
-            sink: "wm_char",
-            tool: "desktop_act:terminal_send",
-            targetHwnd: typeof hwnd === "bigint" ? hwnd : null,
-            payloadChars: t.length,
-          });
-          return postCharsToHwnd(hwnd, t);
-        },
-      });
+            return matches[0];
+          },
+          canBgSend:  (hwnd) => canInjectViaPostMessage(hwnd),
+          bgSend:     (hwnd, t) => {
+            // `TerminalBgDeps` types the handle as `unknown` (it is a test seam);
+            // the concrete value here is the `bigint` from the enumeration above.
+            logDispatchSink({
+              sink: "wm_char",
+              tool: "desktop_act:terminal_send",
+              targetHwnd: typeof hwnd === "bigint" ? hwnd : null,
+              payloadChars: t.length,
+            });
+            return postCharsToHwnd(hwnd, t);
+          },
+        });
+      } catch (err) {
+        // internal #227: Windows Terminal takes no posted characters; with the user's yes, paste.
+        if (!(err instanceof BackgroundTerminalUnsupportedError) || err.reason !== "wt_xaml_pipeline" || typeof err.hwnd !== "bigint") throw err;
+        // A second window wearing the same title is handled there, by saying where this one is: the
+        // handle here comes from discover even when the caller named a title, so "no handle" never
+        // told the two apart (win2 measured the paste landing in the upper of two, #764).
+        await pasteIntoTerminalThroughForeground(err.hwnd, text);
+      }
     },
 
     async keyboardTypeBg(windowTitle, text, hwnd) {

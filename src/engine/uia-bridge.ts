@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { getCachedUia, updateUiaCache } from "./layer-buffer.js";
 import { AIM_WINDOW_GONE, AimedWindowGoneError } from "./aim.js";
 import { computeViewportPosition } from "../utils/viewport-position.js";
-import { nativeUia, type NativeUiElement } from "./native-engine.js";
+import { nativeUia, nativeUiaState, type NativeUiElement } from "./native-engine.js";
 import { isExcludedTitle, isExcludedWindowHandle, isWindowGone, windowAnswers, windowsWhoseTitleContains } from "./win32.js";
 import { WindowExcludedError, hasExcludedPids } from "./tool-exclusion.js";
 
@@ -3159,4 +3159,32 @@ export function detectUiaBlind(
   }
 
   return { blind: false };
+}
+
+let warnedNoSelectedTab = false;
+
+/**
+ * internal #227 — the selected tab of a Windows Terminal window: its name and UIA RuntimeId, `null`
+ * when the window shows no selected tab, `undefined` when it could not be asked (no native engine,
+ * or the read failed). There is no PowerShell road: the caller holds a user's answer to this, and a
+ * slow answer is not better than none.
+ */
+export async function getSelectedTab(
+  hwnd: bigint,
+): Promise<{ name: string; runtimeId: string; paneCount: number } | null | undefined> {
+  if (!nativeUia?.uiaGetSelectedTab) {
+    // Said once, so an old addon is not mistaken for a terminal whose tab cannot be read (gate 2 on #764).
+    if (!warnedNoSelectedTab) {
+      warnedNoSelectedTab = true;
+      console.error(nativeUiaState() === "disabled"
+        ? "[uia-bridge] native UIA is disabled (DESKTOP_TOUCH_DISABLE_NATIVE_UIA=1), so a Windows Terminal tab cannot be read; typing into Windows Terminal is refused"
+        : "[uia-bridge] native uiaGetSelectedTab is missing — rebuild the addon (npm run build:rs); typing into Windows Terminal is refused until then");
+    }
+    return undefined;
+  }
+  try {
+    return await nativeUia.uiaGetSelectedTab(String(hwnd));
+  } catch {
+    return undefined;
+  }
 }

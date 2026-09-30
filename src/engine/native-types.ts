@@ -60,6 +60,14 @@ export interface NativeUiElementsResult {
   elements: Array<NativeUiElement>
 }
 
+/** internal #227 — a Windows Terminal window's selected tab (`uiaGetSelectedTab`). */
+export interface NativeSelectedTab {
+  name: string;
+  runtimeId: string;
+  /** How many panes the selected tab shows; more than one is a split tab. */
+  paneCount: number;
+}
+
 export interface NativeScrollResult {
   ok: boolean
   scrolled: boolean

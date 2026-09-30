@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **`desktop_act` can type into Windows Terminal, after asking.** Windows Terminal ignores
+  characters sent to it in the background, so `desktop_act` typing into its terminal input always
+  ended `executor_failed`. Now the server asks the user through the MCP client's question form
+  (what will be typed, and into which window), every time. On Accept it pastes through the foreground, as `terminal` send's `foreground_flash` does,
+  and puts the previous window back. Decline, Esc, no answer within 120 s, or a client that cannot
+  show the question (`claude -p`, or the HTTP transport) type nothing; the act ends with the new
+  reason `foreground_not_allowed` and a `detail` that says why. Its advice does not send the caller
+  around the user's no, as `executor_failed`'s foreground advice would. The terminal is checked
+  again after the answer, and a question whose tool call was cancelled does not type. There is no
+  way to allow it without the question. The question
+  shows the whole text with the window's title and selected tab, so it must be one line and all of
+  it at most 600 characters; one trailing newline is sent as Enter. When another window has the
+  same title, the question says where the terminal is on screen; two in the same place are refused. If the terminal's window or active tab changed while the user was answering,
+  nothing is typed. A tab split into panes is refused. A terminal that is the window in front is refused: when the client runs in one of
+  its tabs, the paste would arrive as the user's next message.
+
 - **A window on another virtual desktop is not brought forward.** A title search can pick a window
   on another virtual desktop: it can come ahead of a same-titled window on the screen. `keyboard`
   brought it forward, which switched the user to that desktop, and typed nothing. Now, when a tool
