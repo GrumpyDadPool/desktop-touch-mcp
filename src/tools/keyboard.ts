@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { keyboard, withKeyboardLock, rawKeyboard } from "../engine/nutjs.js";
 import { parseKeys } from "../utils/key-map.js";
 import { assertKeyComboSafe } from "../utils/key-safety.js";
-import { enumWindowsInZOrder, getWindowClassName, restoreAndFocusWindow, getWindowRectByHwnd, getForegroundHwnd } from "../engine/win32.js";
+import { enumWindowsInZOrder, getWindowClassName, restoreAndFocusWindow, getWindowRectByHwnd, getForegroundHwnd, getThreadFocus } from "../engine/win32.js";
 import { nativeWin32, hasNativeTypeViaClipboard } from "../engine/native-engine.js";
 import type { NativeTypeViaClipboardResult } from "../engine/native-types.js";
 // ADR-033: the fallback's command-line ceiling, the shared give-up budget and
@@ -185,6 +185,11 @@ export type TypeViaClipboardBackend = "native" | "powershell";
  */
 export interface TypeViaClipboardOutcome {
   backend: TypeViaClipboardBackend;
+  /**
+   * internal #225 — the foreground window's IME was on just before the paste chord, so a pending
+   * composition may have taken the paste. Present only when true. See `IME_OPEN_PASTE_NOTE`.
+   */
+  imeOpen?: true;
   /**
    * The call never changed the user's clipboard, so there was nothing to put
    * back. Present only when true.
@@ -770,8 +775,51 @@ export async function typeViaClipboard(
   // in `nutjs.ts` describes. So: native = the whole transaction, fallback = the
   // chord only.
   return hasNativeTypeViaClipboard()
-    ? withKeyboardLock(() => nativeTypeViaClipboard(text, pasteCombo, tool, byHandle))
-    : powershellTypeViaClipboard(text, pasteCombo, tool, byHandle);
+    ? withKeyboardLock(() => withImeState(() => nativeTypeViaClipboard(text, pasteCombo, tool, byHandle)))
+    : withImeState(() => powershellTypeViaClipboard(text, pasteCombo, tool, byHandle));
+}
+
+/**
+ * internal #225 — the IME is read here, in the paste transaction, so both callers (`keyboard` and
+ * `terminal`) say it, and on the native path inside the keyboard lock, just before the chord: read
+ * earlier, a queued sequence could switch windows in between (gate 2 on #760). The fallback spawns
+ * PowerShell before its chord, so its read is earlier by that much.
+ *
+ * The window asked is the one holding the foreground thread's focus, not the foreground window: its
+ * IME is the one the chord meets. MEASURED win2 (2026-09-30, #760 at `beaaa8d5`): Win11 Notepad's
+ * frame and its RichEdit are on different threads with separate IME windows, so the frame read
+ * `false` with the edit's IME on (and the reverse), while `getThreadFocus(frame).focus` returned the
+ * RichEdit. In Word `_WwG` shares `OpusApp`'s thread, and both agree. Without a focus, the
+ * foreground window is asked.
+ */
+async function withImeState(paste: () => Promise<TypeViaClipboardOutcome>): Promise<TypeViaClipboardOutcome> {
+  const fg = getForegroundHwnd();
+  const imeOpen = imeOpenAt(fg == null ? null : (getThreadFocus(fg)?.focus ?? fg));
+  const outcome = await paste();
+  return imeOpen ? { ...outcome, imeOpen: true } : outcome;
+}
+
+/**
+ * internal #225 — said on a paste made while the foreground window's IME was open. MEASURED win2
+ * (2026-09-30, ATOK 36): with a composition pending (a keystroke ATOK held unconverted), the paste
+ * went to the IME and nothing reached Word's body or Notepad, 3 of 3, while the call answered
+ * `ok:true` and restored the clipboard; with the IME open and nothing pending, and with it closed,
+ * the paste landed every time. Whether a composition is pending cannot be read from outside Word's
+ * body (no TextEditPattern, no composition window, and WM_IME_CONTROL answers on/off only), so this
+ * is a note, not a refusal (the user's choice, 2026-09-30).
+ */
+export const IME_OPEN_PASTE_NOTE =
+  "The IME was on when this pasted. If a composition was pending, the paste went to the IME and nothing was inserted, " +
+  "though this still answers ok. Commit (Enter) or cancel (Esc) any pending composition, then check the text.";
+
+/** Whether the IME of this window is open; false when it cannot be asked. */
+export function imeOpenAt(hwnd: bigint | null): boolean {
+  if (hwnd == null || typeof nativeWin32?.win32GetImeOpenStatus !== "function") return false;
+  try {
+    return nativeWin32.win32GetImeOpenStatus(hwnd) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -807,6 +855,7 @@ export function clipboardPasteHints(outcome: TypeViaClipboardOutcome): Record<st
     backend: outcome.backend,
     ...(outcome.untouched ? { untouched: true } : {}),
     restored: outcome.clipboardRestored,
+    ...(outcome.imeOpen ? { imeOpen: true, imeNote: IME_OPEN_PASTE_NOTE } : {}),
     ...(outcome.restoreSkippedRace ? { restoreSkippedRace: true } : {}),
     ...(outcome.restoreSkippedTooLarge ? { restoreSkippedTooLarge: true } : {}),
     ...(outcome.restoreUnavailable ? { restoreUnavailable: true } : {}),
@@ -1058,7 +1107,8 @@ export const keyboardTypeSchema = {
       "Use this when typing URLs, paths, or ASCII text into apps with Japanese IME active — " +
       "pasted text is not run through IME conversion. Note this does not help while an IME " +
       "composition is already in progress: the paste keystroke is consumed by the IME and " +
-      "nothing is inserted, so commit or cancel the composition first. Your clipboard is " +
+      "nothing is inserted, though the call still answers ok, so commit or cancel the composition first; " +
+      "when the IME was on at the paste, hints.clipboard.imeOpen says so. Your clipboard is " +
       "replaced for the duration of the call and put back afterwards; hints.clipboard reports " +
       "which backend served the paste and whether the restore ran. On builds without the native " +
       "addon this path is capped at about 12000 characters and fails with " +
@@ -3454,7 +3504,8 @@ export const keyboardSchema = z.discriminatedUnion("action", [
         "Use this when typing URLs, paths, or ASCII text into apps with Japanese IME active — " +
         "pasted text is not run through IME conversion. Note this does not help while an IME " +
         "composition is already in progress: the paste keystroke is consumed by the IME and " +
-        "nothing is inserted, so commit or cancel the composition first. Your clipboard is " +
+        "nothing is inserted, though the call still answers ok, so commit or cancel the composition first; " +
+        "when the IME was on at the paste, hints.clipboard.imeOpen says so. Your clipboard is " +
         "replaced for the duration of the call and put back afterwards; hints.clipboard reports " +
         "which backend served the paste and whether the restore ran. On builds without the native " +
         "addon this path is capped at about 12000 characters and fails with " +

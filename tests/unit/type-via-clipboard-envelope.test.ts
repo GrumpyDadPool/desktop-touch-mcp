@@ -14,7 +14,7 @@
  * assertions cover the production plumbing rather than a stub of it.
  */
 
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 
 const execFileMock = vi.fn();
 
@@ -26,9 +26,10 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, execFile: (...args: unknown[]) => execFileMock(...args) };
 });
 
-const nativeState: { available: boolean; composite: ReturnType<typeof vi.fn> } = {
+const nativeState: { available: boolean; composite: ReturnType<typeof vi.fn>; imeOpen: ReturnType<typeof vi.fn> } = {
   available: true,
   composite: vi.fn(),
+  imeOpen: vi.fn(() => false),
 };
 
 vi.mock(import("../../src/engine/native-engine.js"), async (importOriginal) => {
@@ -39,6 +40,7 @@ vi.mock(import("../../src/engine/native-engine.js"), async (importOriginal) => {
     nativeWin32: {
       ...(actual.nativeWin32 ?? {}),
       win32TypeViaClipboard: (...a: unknown[]) => nativeState.composite(...a),
+      win32GetImeOpenStatus: (h: bigint) => nativeState.imeOpen(h),
     } as unknown as typeof actual.nativeWin32,
   };
 });
@@ -71,6 +73,8 @@ vi.mock("../../src/engine/win32.js", async (importOriginal) => {
       },
     ]),
     getWindowClassName: vi.fn(() => "Notepad"),
+    getForegroundHwnd: vi.fn(() => 0x100n),
+    getThreadFocus: vi.fn(() => ({ focus: 0x200n, active: 0x100n })),
     restoreAndFocusWindow: vi.fn(),
     getWindowProcessId: vi.fn(() => 4242),
     getProcessIdentityByPid: vi.fn(() => ({
@@ -609,5 +613,79 @@ describe("ADR-033 I-26 — pasteKey:'auto' picks the chord the target actually p
     // `comboFor` sets the mock's return value, which counts as no call by
     // itself; the assertion is that the handler never asked.
     expect(win32.getProcessIdentityByPid).not.toHaveBeenCalled();
+  });
+});
+
+describe("internal #225 — a paste made while the IME was on says it may not have landed", () => {
+  // As the block above: this is about what the envelope says, not about targeting.
+  let prev: string | undefined;
+  beforeAll(() => { prev = process.env.DESKTOP_TOUCH_REQUIRE_DESTINATION; process.env.DESKTOP_TOUCH_REQUIRE_DESTINATION = "0"; });
+  afterAll(() => { if (prev === undefined) delete process.env.DESKTOP_TOUCH_REQUIRE_DESTINATION; else process.env.DESKTOP_TOUCH_REQUIRE_DESTINATION = prev; });
+  afterEach(() => { nativeState.imeOpen.mockReset(); nativeState.imeOpen.mockImplementation(() => false); });
+
+  const NOTE = "The IME was on when this pasted. If a composition was pending, the paste went to the IME and nothing was inserted, " +
+    "though this still answers ok. Commit (Enter) or cancel (Esc) any pending composition, then check the text.";
+
+  it("notes it, still ok, when the foreground window's IME was open, asking before the paste", async () => {
+    const order: string[] = [];
+    nativeState.imeOpen.mockImplementation(() => { order.push("ime"); return true; });
+    nativeState.composite.mockImplementation(async () => { order.push("paste"); return nativeResult(); });
+    const r = body(await keyboardTypeHandler(keyboardArgs));
+    expect(r.ok).toBe(true);
+    expect(clipboardHints(r)).toEqual({ backend: "native", restored: true, imeOpen: true, imeNote: NOTE });
+    // The foreground thread's focus (Notepad's RichEdit), not the frame (win2 on #760).
+    expect(nativeState.imeOpen).toHaveBeenCalledWith(0x200n);
+    expect(order).toEqual(["ime", "paste"]);
+  });
+
+  it("asks the foreground window itself when its thread has no focus to name", async () => {
+    vi.mocked(win32.getThreadFocus).mockReturnValueOnce(undefined);
+    nativeState.imeOpen.mockImplementation(() => true);
+    nativeState.composite.mockResolvedValue(nativeResult());
+    await keyboardTypeHandler(keyboardArgs);
+    expect(nativeState.imeOpen).toHaveBeenCalledWith(0x100n);
+  });
+
+  it("asks inside the keyboard lock, so a queued sequence cannot switch windows in between (gate 2)", async () => {
+    let inLock = false;
+    vi.mocked(nutjs.withKeyboardLock).mockImplementationOnce(async (fn: () => Promise<unknown>) => {
+      inLock = true;
+      try { return await fn(); } finally { inLock = false; }
+    });
+    let askedInLock: boolean | undefined;
+    nativeState.imeOpen.mockImplementation(() => { askedInLock = inLock; return true; });
+    nativeState.composite.mockResolvedValue(nativeResult());
+    await keyboardTypeHandler(keyboardArgs);
+    expect(askedInLock).toBe(true);
+  });
+
+  it("says nothing when the IME was off (the control)", async () => {
+    nativeState.composite.mockResolvedValue(nativeResult());
+    const r = body(await keyboardTypeHandler(keyboardArgs));
+    expect(r.ok).toBe(true);
+    expect(clipboardHints(r)).toEqual({ backend: "native", restored: true });
+  });
+
+  it("says nothing when the IME could not be asked", async () => {
+    nativeState.imeOpen.mockImplementation(() => { throw new Error("no IME window"); });
+    nativeState.composite.mockResolvedValue(nativeResult());
+    const r = body(await keyboardTypeHandler(keyboardArgs));
+    expect(r.ok).toBe(true);
+    expect(clipboardHints(r)).toEqual({ backend: "native", restored: true });
+  });
+
+  it("does not ask at all when the text was typed, not pasted (gate 2)", async () => {
+    nativeState.imeOpen.mockImplementation(() => true);
+    const r = body(await keyboardTypeHandler({ ...keyboardArgs, use_clipboard: false }));
+    expect(r.ok).toBe(true);
+    expect(clipboardHints(r)).toBeUndefined();
+    expect(nativeState.imeOpen).not.toHaveBeenCalled();
+  });
+
+  it("says it on terminal(send)'s paste too, which is the same transaction (gate 2)", async () => {
+    nativeState.imeOpen.mockImplementation(() => true);
+    nativeState.composite.mockResolvedValue(nativeResult());
+    const r = body(await terminalSendHandler(terminalArgs));
+    expect(clipboardHints(r)).toMatchObject({ imeOpen: true, imeNote: NOTE });
   });
 });
