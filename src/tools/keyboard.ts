@@ -68,6 +68,7 @@ function toResolvedDestination(
   };
 }
 import { resolveWindowTarget } from "./_resolve-window.js";
+import { offDesktopTarget, offDesktopFailure, type OffDesktopTarget } from "./_off-desktop.js";
 import {
   makeCommitWrapper,
   withEnvelopeIncludeForUnion,
@@ -1208,6 +1209,11 @@ interface FocusForKeyboardResult {
    * unsaved marker) is not misclassified as focus loss.
    */
   targetHwnd: bigint | null;
+  /**
+   * internal #221 — set when the window this call would bring forward is on another virtual
+   * desktop. Nothing was focused: the caller refuses rather than switch the user's desktop.
+   */
+  offDesktop?: OffDesktopTarget;
 }
 
 async function focusWindowForKeyboard(
@@ -1227,6 +1233,7 @@ async function focusWindowForKeyboard(
   let foregroundVerified = false;
   let forceRefused = false;
   let targetHwnd: bigint | null = null;
+  let offDesktop: OffDesktopTarget | undefined;
   const needle = windowTitle.toLowerCase();
   // Match by hwnd when supplied, else fall back to title-substring.
   const matches = (w: { title: string; hwnd: bigint }): boolean =>
@@ -1262,7 +1269,12 @@ async function focusWindowForKeyboard(
       targetHwnd = active.hwnd;
     } else {
       const target = windows.find(matches);
-      if (target) {
+      // internal #221: bringing a window on another virtual desktop forward switches the user's
+      // desktop. Refused before anything is focused.
+      const away = target ? await offDesktopTarget(target, windows, explicitHwnd === undefined ? windowTitle : undefined) : null;
+      if (away) {
+        offDesktop = away;
+      } else if (target) {
         // Always verify foreground after focus so the auto-guard does not block
         // on a stale/foreground-steal-prevented SetForegroundWindow. If the first
         // attempt (honoring caller's `force` flag) fails to transfer the foreground,
@@ -1296,7 +1308,7 @@ async function focusWindowForKeyboard(
   } catch {
     // best-effort
   }
-  return { warnings, homingNotes, foregroundVerified, forceRefused, targetHwnd };
+  return { warnings, homingNotes, foregroundVerified, forceRefused, targetHwnd, ...(offDesktop && { offDesktop }) };
 }
 
 /**
@@ -1821,6 +1833,11 @@ export const keyboardTypeHandler = async ({
       // `SendInput(Ctrl+V)` で送るべき (native scope の改修、別 follow-up PR)。
       // 当面 (本 PR scope): clipboard_flash 経路では replaceAll を **silent
       // ignore せず warning で caller に明示** (`ReplaceAllNotSupportedOnClipboardFlash`)。
+      // internal #221: the flash takes the foreground for the target — refused when it is on
+      // another virtual desktop. Placed after the unsupported and wm_char branches (wm_char posts
+      // without taking the foreground), as terminal's twin is (gate 2 on #763).
+      const ffAway = await offDesktopTarget(target, wins, explicitHwnd === undefined ? effectiveWindowTitle : undefined);
+      if (ffAway) return offDesktopFailure("keyboard:type", ffAway, { lensId, extra: { method: "foreground_flash" } });
       const ffWarnings = [...warnings];
       if (replaceAll) {
         ffWarnings.push("ReplaceAllNotSupportedOnClipboardFlash");
@@ -2401,6 +2418,8 @@ export const keyboardTypeHandler = async ({
       warnings.push(...fw.warnings);
       homingNotes.push(...fw.homingNotes);
       foregroundVerified = fw.foregroundVerified;
+      // internal #221: the window is on another virtual desktop — refused, nothing focused or sent.
+      if (fw.offDesktop) return offDesktopFailure("keyboard:type", fw.offDesktop, { lensId });
       // Issue #202: when both default and force escalation refused, surface
       // ForegroundRestricted typed code + ok:false (mirror window.ts:170-185
       // contract from PR #201). Returning ok:true with just a warning was
@@ -3028,6 +3047,8 @@ export const keyboardPressHandler = async ({
       warnings.push(...fw.warnings);
       homingNotes.push(...fw.homingNotes);
       foregroundVerified = fw.foregroundVerified;
+      // internal #221: the window is on another virtual desktop — refused, nothing focused or sent.
+      if (fw.offDesktop) return offDesktopFailure("keyboard:press", fw.offDesktop, { lensId });
       // Issue #202: same contract as keyboard:type above — typed
       // ForegroundRestricted on dual refusal (mirror window.ts:170-185).
       if (fw.forceRefused) {
@@ -3246,6 +3267,8 @@ export const keyboardSequenceHandler = async ({
       warnings.push(...fw.warnings);
       homingNotes.push(...fw.homingNotes);
       foregroundVerified = fw.foregroundVerified;
+      // internal #221: the window is on another virtual desktop — refused, nothing focused or sent.
+      if (fw.offDesktop) return offDesktopFailure("keyboard:sequence", fw.offDesktop, { lensId });
       targetHwnd = fw.targetHwnd;
       if (fw.forceRefused) {
         const earlyEnv = lensId ? buildEnvelopeFor(lensId, { toolName: "keyboard:sequence" }) : null;
@@ -3744,7 +3767,7 @@ export function registerKeyboardTools(server: McpServer): void {
         purpose: "Send keyboard input to a window: 'type' for text, 'press' for key combos, 'sequence' for atomic multi-step chords.",
         details: "action='type' inserts text (auto-clipboard for non-ASCII, bypassing IME conversion). action='press' sends key combos like 'ctrl+c'/'alt+tab'. action='sequence' runs ordered steps in one keyboard lock — use for Alt+letter, letter mnemonic chains where intermediate tool calls would close the menu. windowTitle or hwnd is REQUIRED (blank/whitespace counts as neither) — the server focuses and auto-guards that window (identity, foreground, modal) first, and a call with neither stops with DestinationRequired before any key is sent. Use windowTitle:'@active' to aim at the foreground window on purpose; an hwnd naming a titleless window works only while that window is already foreground. DESKTOP_TOUCH_REQUIRE_DESTINATION=0 downgrades the stop to a warning.",
         prefer: "Set lensId for perception guards. Use desktop_act({action:'setValue'}) for UIA ValuePattern text fields.",
-        caveats: "win+r/win+x/win+s/win+l blocked. action='type' does not handle CJK IME composition — use use_clipboard=true or desktop_act({action:'setValue'}); neither lands while an IME composition is pending — commit or cancel it first. hints.clipboard reports the backend and whether the clipboard was restored. Non-ASCII text (CJK / emoji / diacritics / smart-quote-class punctuation) auto-clipboards to prevent silent-drop and Chrome accelerator hijack; pass forceKeystrokes:true to disable. Background (PostMessage/WM_CHAR) auto-engages for terminal-class windows (Windows Terminal / cmd / PowerShell); DTM_BG_AUTO=1 enables globally. Foreground non-terminal type runs a per-chunk leash; user focus-steal mid-stream aborts with FocusLostDuringType + context.typed/remaining; pass abortOnFocusLoss:false to disable. BG type verifies WM_CHAR via UIA TextPattern read-back; mismatch returns BackgroundInputNotDelivered (see SUGGESTS for false-positive notes). BG press read-back is scoped to terminal-class + enter/tab/arrow; other combos return verifyDelivery:'unverifiable', failure returns BackgroundKeyNotDelivered. action='sequence' is FG-only (BG/foreground_flash schema-rejected); emits verifyDelivery:'focus_only'; mid-loop focus theft returns MenuFocusLostMidSequence + context.remaining: Step[]. Win11 FG refusal returns ForegroundRestricted — terminal-class targets auto-engage BG (except a combo with ctrl/shift/alt and type with replaceAll, which go through FG and can return ForegroundRestricted too); non-terminal switch to desktop_act / click_element.",
+        caveats: "win+r/win+x/win+s/win+l blocked. action='type' does not handle CJK IME composition — use use_clipboard=true or desktop_act({action:'setValue'}); neither lands while an IME composition is pending — commit or cancel it first. hints.clipboard reports the backend and whether the clipboard was restored. Non-ASCII text (CJK / emoji / diacritics / smart-quote-class punctuation) auto-clipboards to prevent silent-drop and Chrome accelerator hijack; pass forceKeystrokes:true to disable. Background (PostMessage/WM_CHAR) auto-engages for terminal-class windows (Windows Terminal / cmd / PowerShell); DTM_BG_AUTO=1 enables globally. Foreground non-terminal type runs a per-chunk leash; user focus-steal mid-stream aborts with FocusLostDuringType + context.typed/remaining; pass abortOnFocusLoss:false to disable. BG type verifies WM_CHAR via UIA TextPattern read-back; mismatch returns BackgroundInputNotDelivered (see SUGGESTS for false-positive notes). BG press read-back is scoped to terminal-class + enter/tab/arrow; other combos return verifyDelivery:'unverifiable', failure returns BackgroundKeyNotDelivered. action='sequence' is FG-only (BG/foreground_flash schema-rejected); emits verifyDelivery:'focus_only'; mid-loop focus theft returns MenuFocusLostMidSequence + context.remaining: Step[]. Win11 FG refusal returns ForegroundRestricted — terminal-class targets auto-engage BG (except a combo with ctrl/shift/alt and type with replaceAll, which go through FG and can return ForegroundRestricted too); non-terminal switch to desktop_act / click_element. Off-desktop target → WindowOnOtherDesktop, not sent.",
         examples: [
           "keyboard({action:'type', text:'hello', windowTitle:'Untitled - Notepad'}) → text injected (guarded)",
           "keyboard({action:'type', text:'hello', windowTitle:'@active'}) → typed into the foreground window",
