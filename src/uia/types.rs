@@ -163,6 +163,8 @@ pub struct ActionResult {
     pub element: Option<String>,
     pub error: Option<String>,
     pub code: Option<String>,
+    /// A click only: which pattern pressed the element, `"default_action"` or `"invoke"` (internal #216).
+    pub pressed_by: Option<String>,
 }
 
 // ─── Element bounds ──────────────────────────────────────────────────────────

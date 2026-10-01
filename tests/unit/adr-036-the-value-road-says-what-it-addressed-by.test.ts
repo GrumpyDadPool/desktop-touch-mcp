@@ -300,6 +300,13 @@ describe("the UIA click road, and its refusals and downgrade", () => {
     expect(row?.addressedBy).toEqual({ automationId: true, name: true });
   });
 
+  it("writes which pattern pressed it when the backend says, and nothing when it does not (internal #216)", async () => {
+    await click({ ...button, locator: { uia: { name: "GO" } } }, aimed, { uiaClick: vi.fn(async () => ({ pressedBy: "default_action" as const })) });
+    expect(allRows().find((r) => r.why === "uia_invoke")).toMatchObject({ route: "uia", pressedBy: "default_action" });
+    await click({ ...button, locator: { uia: { name: "GO" } } }, aimed, { uiaClick: vi.fn(async () => undefined) });
+    expect(allRows().filter((r) => r.why === "uia_invoke").at(-1)?.pressedBy).toBeNull();
+  });
+
   it("writes the axes on a UIA invoke by title and name", async () => {
     await click({ ...button, locator: { uia: { name: "GO" } } }, { kind: "aim", title: "VR-CELL" });
     expect(allRows().find((r) => r.why === "uia_invoke")).toMatchObject({ addressedWindowBy: "title", addressedElementBy: "name_substring" });

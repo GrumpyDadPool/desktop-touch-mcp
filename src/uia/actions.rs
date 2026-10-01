@@ -109,6 +109,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                 element: None,
                 error: Some(e.reason),
                 code,
+                pressed_by: None,
             });
         }
     };
@@ -127,6 +128,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                 element: None,
                 error: Some(e.reason),
                 code: None,
+                pressed_by: None,
             });
         }
     };
@@ -143,55 +145,145 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
             element: None,
             error: Some("Element is disabled".into()),
             code: Some("ElementDisabled".into()),
+            pressed_by: None,
         });
     }
 
-    // Try InvokePattern
+    // Pressed only when the element has InvokePattern, as before: the set of elements a click
+    // reaches does not change. Which pattern presses it can.
     unsafe {
-        let pat = match elem.GetCurrentPattern(UIA_InvokePatternId) {
-            Ok(p) => p,
+        let invoke: IUIAutomationInvokePattern = match elem.GetCurrentPattern(UIA_InvokePatternId) {
+            Ok(p) => match p.cast() {
+                Ok(i) => i,
+                Err(_) => {
+                    return Ok(ActionResult {
+                        ok: false,
+                        element: None,
+                        error: Some("InvokePattern cast failed".into()),
+                        code: Some("PatternNotSupported".into()),
+                        pressed_by: None,
+                    });
+                }
+            },
             Err(_) => {
                 return Ok(ActionResult {
                     ok: false,
                     element: None,
                     error: Some("InvokePattern not supported by this element".into()),
                     code: Some("PatternNotSupported".into()),
+                    pressed_by: None,
                 });
             }
         };
-        let invoke: IUIAutomationInvokePattern = match pat.cast() {
-            Ok(i) => i,
-            Err(_) => {
-                return Ok(ActionResult {
-                    ok: false,
-                    element: None,
-                    error: Some("InvokePattern cast failed".into()),
-                    code: Some("PatternNotSupported".into()),
-                });
+        // Read before the press: a Close or an OK that destroys itself answers nothing afterwards.
+        let name = elem.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+
+        let control_type = elem.CurrentControlType().map(|t| t.0).unwrap_or(0);
+        if presses_by_default_action(control_type) {
+            match press_by_default_action(&elem) {
+                DefaultAction::Pressed => return Ok(pressed(name, PRESSED_BY_DEFAULT_ACTION)),
+                DefaultAction::Failed(e) => {
+                    return Ok(ActionResult {
+                        ok: false,
+                        element: None,
+                        error: Some(format!("{e}")),
+                        code: None,
+                        pressed_by: None,
+                    });
+                }
+                DefaultAction::NotAvailable => {}
             }
-        };
+        }
 
         match invoke.Invoke() {
-            Ok(()) => {
-                let name = elem
-                    .CurrentName()
-                    .map(|b| b.to_string())
-                    .unwrap_or_default();
-                Ok(ActionResult {
-                    ok: true,
-                    element: Some(name),
-                    error: None,
-                    code: None,
-                })
-            }
+            Ok(()) => Ok(pressed(name, PRESSED_BY_INVOKE)),
             Err(e) => Ok(ActionResult {
                 ok: false,
                 element: None,
                 error: Some(format!("{e}")),
                 code: None,
+                pressed_by: None,
             }),
         }
     }
+}
+
+const PRESSED_BY_DEFAULT_ACTION: &str = "default_action";
+const PRESSED_BY_INVOKE: &str = "invoke";
+
+fn pressed(name: String, by: &str) -> ActionResult {
+    ActionResult { ok: true, element: Some(name), error: None, code: None, pressed_by: Some(by.into()) }
+}
+
+/// The control types pressed through `DoDefaultAction`, whose default action is the press itself.
+///
+/// A list, tree or grid item's default action is "Double Click", where `Invoke` only selects it
+/// (win2, 2026-10-01, the WinForms ListBox and ListView rows): whether `DoDefaultAction` runs the
+/// double-click handler — opening or running an item in a file list — is not measured, so those keep
+/// `Invoke`. So does every type not named here: what this list does not know keeps today's press.
+fn presses_by_default_action(control_type: i32) -> bool {
+    [
+        UIA_ButtonControlTypeId,
+        UIA_CheckBoxControlTypeId,
+        UIA_RadioButtonControlTypeId,
+        UIA_HyperlinkControlTypeId,
+        UIA_MenuItemControlTypeId,
+    ]
+    .iter()
+    .any(|t| t.0 == control_type)
+}
+
+enum DefaultAction {
+    Pressed,
+    /// The element has no default action to do, or said it did not do it: Invoke may press it.
+    NotAvailable,
+    /// Any other failure. It may come after the action happened (a window that closed, a timeout),
+    /// so Invoke is not tried: that could press twice.
+    Failed(windows::core::Error),
+}
+
+/// internal #216 — press through `LegacyIAccessible.DoDefaultAction` rather than `Invoke`.
+///
+/// MEASURED win2 (2026-10-01, dev/gis216-spike RESULTS-DDP-run2, every run starting from the
+/// user's window in front): after a UIA `Invoke` on a WinForms check box or list item, a
+/// MessageBox's Cancel or a VS Code control, closing the window it opened left the foreground on
+/// GameInputSvc's message-only window — 6/6, 3/3, 3/3 and 4/4 — instead of the window that was in
+/// front before. While that window is in front, `SetCursorPos` and bringing a window forward fail,
+/// so this server's mouse and foreground roads stop working until the user clicks somewhere. The
+/// same controls pressed by `DoDefaultAction` gave 0 of 33, every one of them pressed. WPF and
+/// XAML controls, Edge's page and Explorer gave 0 either way.
+///
+/// No reaction is told by the HRESULT, never by an unchanged tree: WPF pressed 6/6 through
+/// `DoDefaultAction` with nothing changed in UIA, and pressing again there would press twice.
+/// In the spike no `DoDefaultAction` returned an error (0 of 33).
+unsafe fn press_by_default_action(elem: &IUIAutomationElement) -> DefaultAction {
+    unsafe {
+        let Ok(pattern) = elem.GetCurrentPattern(UIA_LegacyIAccessiblePatternId) else {
+            return DefaultAction::NotAvailable;
+        };
+        let Ok(legacy) = pattern.cast::<IUIAutomationLegacyIAccessiblePattern>() else {
+            return DefaultAction::NotAvailable;
+        };
+        // An element with no default action is not asked to do one.
+        match legacy.CurrentDefaultAction() {
+            Ok(action) if !action.is_empty() => {}
+            _ => return DefaultAction::NotAvailable,
+        }
+        match legacy.DoDefaultAction() {
+            Ok(()) => DefaultAction::Pressed,
+            Err(e) if default_action_not_done(e.code().0) => DefaultAction::NotAvailable,
+            Err(e) => DefaultAction::Failed(e),
+        }
+    }
+}
+
+/// The HRESULTs that say the default action was not done: there is none (`DISP_E_MEMBERNOTFOUND`),
+/// or the provider does not implement it (`E_NOTIMPL`, `UIA_E_NOTSUPPORTED`).
+fn default_action_not_done(hresult: i32) -> bool {
+    const DISP_E_MEMBERNOTFOUND: u32 = 0x8002_0003;
+    const E_NOTIMPL: u32 = 0x8000_4001;
+    const UIA_E_NOTSUPPORTED: u32 = 0x8004_0204;
+    matches!(hresult as u32, DISP_E_MEMBERNOTFOUND | E_NOTIMPL | UIA_E_NOTSUPPORTED)
 }
 
 fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<ActionResult> {
@@ -204,6 +296,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some(e.reason),
                 code,
+                pressed_by: None,
             });
         }
     };
@@ -222,6 +315,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some(e.reason),
                 code: None,
+                pressed_by: None,
             });
         }
     };
@@ -235,6 +329,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                     element: None,
                     error: Some("ValuePattern not supported by this element".into()),
                     code: Some("PatternNotSupported".into()),
+                    pressed_by: None,
                 });
             }
         };
@@ -246,6 +341,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                     element: None,
                     error: Some("ValuePattern cast failed".into()),
                     code: Some("PatternNotSupported".into()),
+                    pressed_by: None,
                 });
             }
         };
@@ -262,6 +358,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some("Element is disabled".into()),
                 code: Some("ElementDisabled".into()),
+                pressed_by: None,
             });
         }
 
@@ -292,6 +389,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some("Value is read-only".into()),
                 code: Some("ElementReadOnly".into()),
+                pressed_by: None,
             });
         }
 
@@ -339,6 +437,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                             "SetValue returned success, but the element's value read back unchanged for {NOT_APPLIED_SETTLE_MS} ms after it"
                         )),
                         code: Some("ValueNotApplied".into()),
+                        pressed_by: None,
                     });
                 }
                 Ok(ActionResult {
@@ -346,6 +445,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                     element: None,
                     error: None,
                     code: None,
+                    pressed_by: None,
                 })
             }
             // A write that failed on an element that said read-only is named read-only, in words
@@ -355,12 +455,14 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some("Value is read-only".into()),
                 code: Some("ElementReadOnly".into()),
+                pressed_by: None,
             }),
             Err(e) => Ok(ActionResult {
                 ok: false,
                 element: None,
                 error: Some(format!("{e}")),
                 code: None,
+                pressed_by: None,
             }),
         }
     }
@@ -405,6 +507,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 element: None,
                 error: Some(e.reason),
                 code,
+                pressed_by: None,
             });
         }
     };
@@ -423,6 +526,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 element: None,
                 error: Some(e.reason),
                 code: None,
+                pressed_by: None,
             });
         }
     };
@@ -434,6 +538,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
             element: None,
             error: Some("Element is disabled".into()),
             code: Some("ElementDisabled".into()),
+            pressed_by: None,
         });
     }
 
@@ -457,6 +562,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                     element: None,
                     error: Some("TextPattern2 cast failed".into()),
                     code: Some("TextPattern2NotSupported".into()),
+                    pressed_by: None,
                 })
             }
             Err(_) => Ok(ActionResult {
@@ -464,6 +570,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 element: None,
                 error: Some("TextPattern2 not supported by this element".into()),
                 code: Some("TextPattern2NotSupported".into()),
+                pressed_by: None,
             }),
         }
     }
@@ -677,6 +784,29 @@ mod tests {
         assert!(!super::write_is_checked(UIA_DocumentControlTypeId.0));
         assert!(super::write_is_checked(UIA_ComboBoxControlTypeId.0));
         assert!(super::write_is_checked(UIA_SpinnerControlTypeId.0));
+    }
+
+    #[test]
+    fn press_like_controls_take_the_default_action_and_items_keep_invoke() {
+        for t in [UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_RadioButtonControlTypeId, UIA_HyperlinkControlTypeId, UIA_MenuItemControlTypeId] {
+            assert!(super::presses_by_default_action(t.0), "{}", t.0);
+        }
+        // "Double Click" is their default action, where Invoke selects.
+        for t in [UIA_ListItemControlTypeId, UIA_TreeItemControlTypeId, UIA_DataItemControlTypeId, UIA_SplitButtonControlTypeId, UIA_TabItemControlTypeId] {
+            assert!(!super::presses_by_default_action(t.0), "{}", t.0);
+        }
+        assert!(!super::presses_by_default_action(0));
+    }
+
+    #[test]
+    fn only_a_said_not_done_default_action_falls_to_invoke() {
+        assert!(super::default_action_not_done(0x8002_0003_u32 as i32)); // DISP_E_MEMBERNOTFOUND
+        assert!(super::default_action_not_done(0x8000_4001_u32 as i32)); // E_NOTIMPL
+        assert!(super::default_action_not_done(0x8004_0204_u32 as i32)); // UIA_E_NOTSUPPORTED
+        // May come after the press: an element that closed, a timeout, a generic failure.
+        assert!(!super::default_action_not_done(0x8004_0201_u32 as i32)); // UIA_E_ELEMENTNOTAVAILABLE
+        assert!(!super::default_action_not_done(0x8013_1505_u32 as i32)); // UIA_E_TIMEOUT
+        assert!(!super::default_action_not_done(0x8000_4005_u32 as i32)); // E_FAIL
     }
 
     #[test]

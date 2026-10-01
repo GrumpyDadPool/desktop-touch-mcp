@@ -132,7 +132,8 @@ export interface ExecutorDeps {
    * answering to the same title cannot take the action. Trailing and optional so a backend
    * (or a test double) that ignores it still satisfies the interface.
    */
-  uiaClick(windowTitle: string, name?: string, automationId?: string, hwnd?: bigint): Promise<void>;
+  /** Resolves with which pattern pressed the element, when the backend says (internal #216). */
+  uiaClick(windowTitle: string, name?: string, automationId?: string, hwnd?: bigint): Promise<{ pressedBy?: "default_action" | "invoke" } | void>;
   /** UIA ValuePattern: type text into a textbox. `hwnd` as in {@link ExecutorDeps.uiaClick}. */
   uiaSetValue(windowTitle: string, value: string, name?: string, automationId?: string, hwnd?: bigint): Promise<void>;
   /** CDP: click a DOM element by CSS selector. */
@@ -2744,8 +2745,8 @@ export function createDesktopExecutor(
         }
       }
       try {
-        await d.uiaClick(winTitle, name, automationId, aimHwnd);
-        probeRoute("uia", aimHwnd, entity, { why: "uia_invoke", addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
+        const pressed = await d.uiaClick(winTitle, name, automationId, aimHwnd);
+        probeRoute("uia", aimHwnd, entity, { why: "uia_invoke", pressedBy: pressed?.pressedBy ?? null, addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
         return "uia";
       } catch (uiaErr) {
         // R3 tool-exclusion — a refusal is not a failure to route around. Every other throw
@@ -3173,6 +3174,7 @@ function getSharedRealDeps(): ExecutorDeps {
       // Which client answered, carried on the error: item 16 believes a "not found" only from the
       // native client, about an entity the native client read.
       if (!r.ok) throw Object.assign(new Error(r.error ?? "UIA click failed"), { uiaVia: r.via });
+      return r.pressedBy !== undefined ? { pressedBy: r.pressedBy } : undefined;
     },
 
     async uiaSetValue(windowTitle, value, name, automationId, hwnd) {

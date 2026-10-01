@@ -238,6 +238,16 @@ describe("the bridge says which client answered a failed write", () => {
     const err = await _realExecutorDepsForTest().uiaSetValue("T1-FIXTURE", "x", "FOXTROT").then(() => null, (e: unknown) => e as { uiaVia?: unknown });
     expect(err?.uiaVia).toBe("native");
   });
+
+  it("the production click dep hands on which pattern pressed (internal #216)", async () => {
+    vi.resetModules();
+    vi.doMock("../../src/engine/uia-bridge.js", async (orig) => ({
+      ...(await orig<typeof import("../../src/engine/uia-bridge.js")>()),
+      clickElement: vi.fn(async () => ({ ok: true, element: "OK", via: "native" as const, pressedBy: "default_action" as const })),
+    }));
+    const { _realExecutorDepsForTest } = await import("../../src/tools/desktop-executor.js");
+    expect(await _realExecutorDepsForTest().uiaClick("T1-FIXTURE", "OK")).toEqual({ pressedBy: "default_action" });
+  });
 });
 
 describe("windowIsAlive — three answers, so a failed question is never \"gone\" (gate 2, round 2)", () => {
