@@ -238,7 +238,9 @@ enum DefaultAction {
     /// The element has no default action to do, or said it did not do it: Invoke may press it.
     NotAvailable,
     /// Any other failure. It may come after the action happened (a window that closed, a timeout),
-    /// so Invoke is not tried: that could press twice.
+    /// so Invoke is not tried here. The failure goes back as an uncoded `ok: false`, as an Invoke
+    /// failure always has, and a title-only act still downgrades that to a press at the entity's
+    /// rect, which can press a second time (gate 2 on 7cdaeb52; not new, internal #232).
     Failed(windows::core::Error),
 }
 
