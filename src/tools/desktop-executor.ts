@@ -1699,7 +1699,9 @@ type RowKeysLandingMayNotWrite =
   | "rung" | "refused"
   | "why" | "verdict" | "referenceFrom" | "ground" | "addressedWindowBy"
   // The rung's "gone" refusal (item 16 on the write road, t1).
-  | "routeFailure" | "gone" | "readVia" | "setVia";
+  | "routeFailure" | "gone" | "readVia" | "setVia"
+  // The host refusal after Word's page text was read (internal #224 on 2.1.0).
+  | "check";
 
 /** What the rung's row may be given by {@link keyboardLanding}: any fact but the row's own keys. */
 type LandingFacts = Record<string, unknown> & { readonly [K in RowKeysLandingMayNotWrite]?: never };
