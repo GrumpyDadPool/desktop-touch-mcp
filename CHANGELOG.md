@@ -1,10 +1,14 @@
 # Changelog
 
-## [2.1.0] - 2026-10-01 — `desktop_discover` reads web pages and deep windows, and `desktop_act` types into Windows Terminal and Word
+## [2.1.0] - 2026-10-01 — `desktop_discover` reads UI Automation by element count, not depth: web pages, Explorer, Settings and Word come within reach, and `desktop_act` types into Windows Terminal after asking
 
-2.1 widens what the tools can read and write. Nothing is removed or renamed: the changes add fields,
-values and refusal reasons (**New**), change what some reads return (**Changed**), and correct answers
-that were wrong (**Fixed**).
+The main change: `desktop_discover`'s UI Automation read used to stop at depth 4, and now goes to
+depth 64 and stops at 500 elements. Browsers, Electron apps, Explorer and Settings keep their controls
+below depth 4, so they were reported blind or missing values; now they are read, and what is read can
+be acted on (table below). Word's body, which the old walk could not enter at any depth, is read too.
+Alongside it, `desktop_act` types into Word's body, and into Windows Terminal after asking the user. Nothing is removed or renamed: the changes add fields, values
+and refusal reasons (**New**), change what some reads return (**Changed**), and correct answers that
+were wrong (**Fixed**).
 
 ### What 2.1 reads and writes that 2.0 did not
 
@@ -36,6 +40,36 @@ the 500-element cap is reported as truncated (an Excel sheet at 100 % zoom, abou
 
 ### New
 
+- **`desktop_discover` reads deeper into a window's UI Automation tree.** Its UIA read stopped at
+  depth 4. So Chrome, Edge and VS Code, which expose their page controls at depth 7–12, were
+  reported as `uia_blind_single_pane`, and value labels in Explorer and Settings (depth 5–7) were
+  missing. The read now goes to depth 64 and stops at 500 elements. Across the 17 kinds of app
+  measured (Win32, WinUI, UWP, WinForms, WPF, Electron, browsers, Explorer, consoles), the most any
+  returned was 128 elements, in at most about 0.4 s. A read that stops at its 500-element cap is
+  reported with `uia_tree_truncated`. When the native UIA engine is not available, the PowerShell
+  fallback keeps the old depth.
+
+- **`desktop_discover` reaches Word's document body.** Word answers UI Automation's request for all
+  children of its document area with one small pane, and the walk used that request, so it never
+  listed a page or the body. A read of Word now lists each visible page and its body, a `textbox`
+  that can be clicked. Pages scrolled past are left out, as other offscreen elements are. Other
+  applications read as before.
+
+- **`desktop_discover`'s `query` finds a Word page by the words on it.** A page's body is listed
+  under its name ("ページ 1 のコンテンツ"), so a query for words in the document matched nothing.
+  Now the text visible on each page shown is matched as well. The text is only matched: it is not
+  in the reply, and no other tool returns it. Text scrolled out of view is still not matched.
+
+- **`desktop_act` types into Word's body.** The body offers UI Automation no value to write, so
+  `desktop_act(type)` had no route into it and was refused. It is now offered the keyboard, and the
+  characters are posted to Word's document window. They land at Word's caret whether Word is in front
+  or behind, and whatever holds Word's focus. Before, the ribbon's font-size box took them. The caret
+  may be on another page than the body named. The reply says the landing could not be confirmed.
+  Word's AutoCorrect applies to the text as it does to typing. `setValue` is refused, because
+  keystrokes insert rather than replace: select the text first, then `type`. In Word, ctrl+a
+  selects the whole document. If a dialog is open over Word, or Word's document window has changed
+  since the read, nothing is typed. Other text fields with no value are refused as before.
+
 - **`desktop_act` can type into Windows Terminal, after asking.** Windows Terminal ignores
   characters sent to it in the background, so `desktop_act` typing into its terminal input always
   ended `executor_failed`. Now the server asks the user through the MCP client's question form
@@ -55,27 +89,6 @@ the 500-element cap is reported as truncated (an Excel sheet at 100 % zoom, abou
   its tabs, the paste would arrive as the user's next message. Before pasting, the server puts the
   terminal's keyboard focus on its input, so an open find box does not take the text; when it
   cannot, nothing is typed (`terminal_focus_failed` in the detail).
-
-- **`desktop_act` types into Word's body.** The body offers UI Automation no value to write, so
-  `desktop_act(type)` had no route into it and was refused. It is now offered the keyboard, and the
-  characters are posted to Word's document window. They land at Word's caret whether Word is in front
-  or behind, and whatever holds Word's focus. Before, the ribbon's font-size box took them. The caret
-  may be on another page than the body named. The reply says the landing could not be confirmed.
-  Word's AutoCorrect applies to the text as it does to typing. `setValue` is refused, because
-  keystrokes insert rather than replace: select the text first, then `type`. In Word, ctrl+a
-  selects the whole document. If a dialog is open over Word, or Word's document window has changed
-  since the read, nothing is typed. Other text fields with no value are refused as before.
-
-- **`desktop_discover` reaches Word's document body.** Word answers UI Automation's request for all
-  children of its document area with one small pane, and the walk used that request, so it never
-  listed a page or the body. A read of Word now lists each visible page and its body, a `textbox`
-  that can be clicked. Pages scrolled past are left out, as other offscreen elements are. Other
-  applications read as before.
-
-- **`desktop_discover`'s `query` finds a Word page by the words on it.** A page's body is listed
-  under its name ("ページ 1 のコンテンツ"), so a query for words in the document matched nothing.
-  Now the text visible on each page shown is matched as well. The text is only matched: it is not
-  in the reply, and no other tool returns it. Text scrolled out of view is still not matched.
 
 - **Rich narration says when an element's name changed.** Some apps show a value in an element's
   name rather than its value: a calculator's display, a status bar's item count. When such a name
@@ -144,15 +157,6 @@ the 500-element cap is reported as truncated (an Excel sheet at 100 % zoom, abou
   any pending composition, then check the text.
 
 ### Changed
-
-- **`desktop_discover` reads deeper into a window's UI Automation tree.** Its UIA read stopped at
-  depth 4. So Chrome, Edge and VS Code, which expose their page controls at depth 7–12, were
-  reported as `uia_blind_single_pane`, and value labels in Explorer and Settings (depth 5–7) were
-  missing. The read now goes to depth 64 and stops at 500 elements. Across the 17 kinds of app
-  measured (Win32, WinUI, UWP, WinForms, WPF, Electron, browsers, Explorer, consoles), the most any
-  returned was 128 elements, in at most about 0.4 s. A read that stops at its 500-element cap is
-  reported with `uia_tree_truncated`. When the native UIA engine is not available, the PowerShell
-  fallback keeps the old depth.
 
 - **In a window holding a web page, `desktop_discover` lists the page first.** Browsers and
   Electron apps now expose their pages to the deeper UIA read. In read order, though, the browser's
