@@ -6,9 +6,10 @@ The main change: `desktop_discover`'s UI Automation read used to stop at depth 4
 depth 64 and stops at 500 elements. Browsers, Electron apps, Explorer and Settings keep their controls
 below depth 4, so they were reported blind or missing values; now they are read, and what is read can
 be acted on (table below). Word's body, which the old walk could not enter at any depth, is read too.
-Alongside it, `desktop_act` types into Word's body, and into Windows Terminal after asking the user. Nothing is removed or renamed: the changes add fields, values
-and refusal reasons (**New**), change what some reads return (**Changed**), and correct answers that
-were wrong (**Fixed**).
+What UIA still cannot see falls back to OCR and Set-of-Marks as before. Alongside it, `desktop_act`
+types into Word's body, and into Windows Terminal after asking the user. Nothing is removed or
+renamed: the changes add fields, values and refusal reasons (**New**), change what some reads return
+(**Changed**), and correct answers that were wrong (**Fixed**).
 
 ### What 2.1 reads and writes that 2.0 did not
 
@@ -37,6 +38,13 @@ Write: `desktop_act`.
 
 Still not reached: a spreadsheet cell's value (UI Automation does not expose it); a read that fills
 the 500-element cap is reported as truncated (an Excel sheet at 100 % zoom, about 517 elements).
+
+**The visual fallbacks stay.** A window UI Automation still cannot see (games, RDP sessions, canvas
+apps, apps with no accessibility tree) is read as before: `desktop_discover` runs OCR on it and returns
+Set-of-Marks visual entities, and `screenshot(detail: "text")` still falls back to Windows OCR when the
+UIA read is sparse. The one difference: a window UIA now reads, such as a browser page, is no longer
+sent to OCR automatically. For text UIA does not expose (a spreadsheet cell, a page's body text), use
+`screenshot(detail: "ocr")`.
 
 ### New
 
