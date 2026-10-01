@@ -140,10 +140,11 @@ describe("ADR-036: desktop_state names the road that left the value out", () => 
    * instructions that had framed it since before the first round.
    */
   it("keeps the two hand-written renderings exactly as measurement left them", () => {
+    // In the guide since 2.1.0: the README keeps the workflow and links here for the recovery hints.
     const EXPECTED: Record<string, string> = {
-      "README.md":
+      "docs/guide.md":
         "A successful `type` can carry `landing: { confirmed: false, why }`. The write took the background route, but the server could not confirm that it reached the field you named — for example, in a WPF window, whose fields have no window of their own. **This is a report, not a state that can be resolved here**: nothing in the response establishes whether the characters arrived, reading the field back does not settle it (`desktop_state` answers about the foreground, and may come back with no value at all — `hints.focusedElementValueAbsent` names the road that dropped it, `view_road_has_no_value` or `masked_on_this_road`, and no hint is not evidence a value was there — or name a field in another window with the same title), `diff.value_changed` is not delivery either, its baseline being your `desktop_discover` snapshot rather than the write, and retrying a nonempty write is not a repeat — a background write lands at the caret and replaces the selection, exactly as typing does.",
-      "README.ja.md":
+      "docs/guide.ja.md":
         "成功した `type` に `landing: { confirmed: false, why }` が付くことがある。書き込みは背景の経路を通ったが、指定した欄に届いたことをサーバが確かめられなかった（例: WPF のウィンドウは欄ごとのウィンドウを持たない）。**これは報告であり、ここで解消できる状態ではない**——応答の中に文字が届いたかを示すものは無く、欄を読み返しても決着しない（`desktop_state` は前面について答え、値を一切返さないことも、同じ題の別の窓の欄を名乗ることもある。`hints.focusedElementValueAbsent` は落とした road を名乗る——`view_road_has_no_value` か `masked_on_this_road`。**hint が無いことは値が在った証拠ではない**）。`diff.value_changed` も配達ではない——その基準は書き込みではなく `desktop_discover` のスナップショットである。そして**空でない書き込みの再試行は反復ではない**——背景の書き込みは打鍵と同じくキャレット位置に入り、選択を置換する。",
     };
     for (const [rel, expected] of Object.entries(EXPECTED)) {
@@ -591,10 +592,10 @@ describe("ADR-036: desktop_state names the road that left the value out", () => 
       fixture("server-windows.instructions.txt"),
     );
 
-    // 3. The README sections, heading to next heading.
+    // 3. The guide sections, heading to next heading (the README's recovery hints moved to the guide in 2.1.0).
     for (const [rel, name, needle] of [
-      ["README.md", "README.section.md", "A successful `type` can carry"],
-      ["README.ja.md", "README.ja.section.md", "成功した `type` に `landing"],
+      ["docs/guide.md", "guide.section.md", "A successful `type` can carry"],
+      ["docs/guide.ja.md", "guide.ja.section.md", "成功した `type` に `landing"],
     ] as const) {
       const text = source(rel);
       const at = text.indexOf(needle);
@@ -645,8 +646,8 @@ describe("ADR-036: desktop_state names the road that left the value out", () => 
     // they were sent or landed.
     expect(docs, "a document that speaks about an unconfirmed landing was added or removed").toEqual([
       "CHANGELOG.md",
-      "README.ja.md",
-      "README.md",
+      "docs/guide.ja.md",
+      "docs/guide.md",
       "docs/system-overview.md",
     ]);
   });

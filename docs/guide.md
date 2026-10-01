@@ -1,0 +1,759 @@
+# desktop-touch-mcp guide
+
+[日本語](guide.ja.md) · [Back to the README](../README.md)
+
+The details the [README](../README.md) leaves out: recovery hints, each subsystem, configuration and
+diagnostics. Start with the README for installation, the tool list and the standard workflow.
+
+## Contents
+
+- [Recovery hints and leases](#recovery-hints-and-leases)
+- [Terminal command completion (`until`)](#terminal-command-completion-until)
+- [Key Locker (terminal credential autofill)](#key-locker-terminal-credential-autofill)
+- [Browser CDP automation](#browser-cdp-automation)
+- [Auto-dock CLI on startup](#auto-dock-cli-on-startup)
+- [Mouse homing correction](#mouse-homing-correction)
+- [`screenshot` key parameters](#screenshot-key-parameters)
+- [Security](#security)
+- [Mouse movement speed](#mouse-movement-speed)
+- [Force-Focus (AttachThreadInput)](#force-focus-attachthreadinput)
+- [Auto Guard](#auto-guard)
+- [Diagnostic log](#diagnostic-log)
+- [Advanced response options](#advanced-response-options)
+- [Performance of the native engine (measured at v0.15)](#performance-of-the-native-engine-measured-at-v015)
+- [UI Operating Layer (V2)](#ui-operating-layer-v2)
+- [Token cost reference](#token-cost-reference)
+
+---
+
+## Recovery hints and leases
+
+Recovery hints — read `response.attention` after every observation and `response.warnings[]` on `desktop_discover` / `desktop_act`. Common reasons:
+
+- `lease_expired` / `lease_generation_mismatch` / `lease_digest_mismatch` / `entity_not_found` → re-call `desktop_discover`
+- `modal_blocking` → `response.blockingElement` (when present) names the blocking modal. `role: "dialog"` means a separate dialog window has disabled the target's window: `blockingElement.hwnd` is that dialog — re-call `desktop_discover` with `target.hwnd = blockingElement.hwnd`, answer it there, then retry (`name` is its title, which may be empty or shared). Any other role: a window the `desktop_discover` snapshot holds, where the OS could not say whether it blocks this entity — with `blockingElement.hwnd`, re-call `desktop_discover` with `target.hwnd = blockingElement.hwnd` and answer it there; without it, dismiss via `click_element(name=blockingElement.name)`. Then re-call `desktop_discover` on the original target and act on the new lease — this refusal came from that snapshot, so the same lease is refused again
+- `entity_outside_viewport` → the element moved off screen: `scroll(action='to_element' | 'raw')`, or re-call `desktop_discover` if its window moved or closed
+- `origin_window_not_visible` → the element's window is minimised or hidden, so nothing is drawn where it was found: `focus_window(windowTitle)` to restore it, then re-call `desktop_discover`
+- `coordinate_outside_reachable_bounds` → the coordinate is not on any connected monitor. Coordinate-based mouse input (`mouse_click` / `mouse_drag` / `scroll` / `browser_click`, and the mouse route inside `desktop_act`) now works on every monitor, including monitors placed left of or above the primary one, so this error normally means the coordinates are stale — the window moved or closed after they were read. Re-run `desktop_discover` and act on the new coordinates. If the server is running without its built-in Windows input module, mouse input falls back to the primary monitor only; the error message says so, and moving the window onto the primary monitor (or reinstalling the server) is the fix
+- `cursor_placement_blocked` → the coordinate is on a monitor, but the pointer could not be placed there, so nothing was clicked. This happens while another app confines the cursor to its own window (common in full-screen games), while a remote-desktop session is disconnected or locked, while another program keeps repositioning the pointer, or right after a monitor is added or removed. Leave the app holding the cursor, reconnect the session, or — after a monitor change — re-run `desktop_discover`, then retry. `click_element` acts through the accessibility API without moving the cursor and works meanwhile
+- `keyboard_target_unsafe` → a `type` was refused, because the characters would not have reached the field you named: the keyboard focus is on a different control or in a different window, the control that would receive them — or the field you named — is read-only, or the field you named — or its window — is disabled. Nothing was typed, and `if_unexpected.detail` says which. For a disabled field, answer or wait out whatever disabled it, then re-run `desktop_discover` and type again; clicking it does not help, and `desktop_discover` does not list a disabled field, so while it is missing there it is still disabled. A field you named that is read-only does not take text; typing again will not change that. For another control or window, put the focus on the field you named, then type again; `if_unexpected.detail` names the way back for the road the act took. On a window named by title, `desktop_act` with `action='click'` on the same entity does it. On a window named by handle nothing here moves the focus to a text field yet, so re-run `desktop_discover` by the window's title and click the field there — a common dialog's title resolves to a handle as well, so that road does not open there. For another window, bring the field's window forward first (`focus_window`): it comes forward with the focus it last had, and the window holding the focus is usually drawn over the field. Do not retry with a foreground `keyboard` type: whatever holds the focus would take the characters
+- `executor_failed` → fall back to `click_element` / `mouse_click` / `browser_click`
+
+A successful `type` can carry `landing: { confirmed: false, why }`. The write took the background route, but the server could not confirm that it reached the field you named — for example, in a WPF window, whose fields have no window of their own. **This is a report, not a state that can be resolved here**: nothing in the response establishes whether the characters arrived, reading the field back does not settle it (`desktop_state` answers about the foreground, and may come back with no value at all — `hints.focusedElementValueAbsent` names the road that dropped it, `view_road_has_no_value` or `masked_on_this_road`, and no hint is not evidence a value was there — or name a field in another window with the same title), `diff.value_changed` is not delivery either, its baseline being your `desktop_discover` snapshot rather than the write, and retrying a nonempty write is not a repeat — a background write lands at the caret and replaces the selection, exactly as typing does.
+
+Lease lifecycle:
+
+- Each `desktop_discover` response carries `softExpiresAtMs` (≈ 60 % of the TTL window). Past that timestamp the LLM should consider re-calling `desktop_discover` even though the lease is still technically valid — `lease.expiresAtMs` is the only correctness wall.
+- TTL adapts to `view` mode (`action`/`explore`/`debug`), entity count, and response payload size. Cap is 60 s.
+- Set `DESKTOP_TOUCH_DISABLE_FUKUWARAI_V2=1` to fall back to the v1 tool surface (`get_windows` / `get_ui_elements` / `set_element_value`) for troubleshooting only — V2 is the recommended default.
+
+---
+
+## Terminal command completion (`until`)
+
+`terminal(action='run')` sends a command, waits for it to complete, and reads the
+output in one call. How it decides "complete" is controlled by `until`:
+
+| Mode | Waits for | Best for |
+|---|---|---|
+| `quiet` (default) | output to fall silent for `quietMs` | short interactive commands |
+| `pattern` | a string/regex you expect in the output | long commands with a known final marker |
+| `exit` | the command to actually **finish** | when you need completion or the exit code |
+
+> **Anchoring caveat (#384):** a command whose final line has no trailing newline
+> glues the marker to the next prompt with no line boundary (`printf X` →
+> `Xuser@host:~$`), so an end-anchored `pattern` (`X\s*\n` / `X$`) can never bind.
+> For *completion* use `mode:'exit'`; for *content* matching use a bare marker
+> (no `\n`/`$`). `mode:'pattern'` also accepts an optional `quietMs` settle
+> fallback: `until:{mode:'pattern', pattern, quietMs:1000}` completes with
+> `reason:'quiet'` (no `matchedPattern`) once output is stable for that long
+> without a match — instead of hanging until `timeoutMs`. It is opt-in (omit
+> `quietMs` to keep waiting for the pattern; long commands with mid-run silent
+> gaps are unaffected).
+
+### `until:{mode:'exit'}` — real completion + exit code
+
+The heuristic modes can misfire on the common "append a sentinel" idiom
+(`some-task; echo DONE` matched by `DONE`): the sentinel also shows up in the
+**echoed command line**, and for multi-line commands there is no reliable way to
+tell that echo apart from real output. `mode:'exit'` removes the guesswork — the
+server appends its own completion marker whose *printed* form differs from its
+*typed* form, so it never matches the echoed command (even for multi-line input),
+and it returns the real process exit code:
+
+```js
+terminal({
+  action: 'run',
+  windowTitle: 'pwsh',
+  input: 'npm run build',
+  until: { mode: 'exit', shell: 'powershell' },
+})
+// → completion: { reason: 'exited', exitCode: 0, elapsedMs: … }
+//   output: just the command's real output (the injected marker is stripped)
+```
+
+- **Pass `shell` explicitly** (`'bash'` or `'powershell'`). `shell:'auto'` detects
+  the shell from the terminal window, but it cannot see a shell running *inside*
+  SSH or WSL — the window still looks like its local host — so for remote/nested
+  sessions pass the remote side's shell (`auto` otherwise warns and may pick the
+  outer shell). A window whose process is genuinely unidentifiable (e.g. Windows
+  Terminal) returns `ExitModeShellAmbiguous`.
+- **First-class shells:** `bash` and `powershell`. `cmd.exe` is not supported yet
+  (`ExitModeShellUnsupported`).
+- **Unsafe input is rejected up front** (`ExitModeUnsafeInput`) rather than
+  hanging: a command ending mid-construct (unterminated quote, here-doc, `$(…)`,
+  a trailing `\` or PowerShell backtick).
+- Exit mode controls its own delivery, so delivery-shaping `sendOptions`
+  (`method` / `preferClipboard` / `pressEnter` / `chunkSize` / `pasteKey`) are
+  rejected with `InvalidArgs`; focus options remain accepted.
+
+---
+
+## Key Locker (terminal credential autofill)
+
+Running `ssh user@host` or `sudo …` normally stops at a hidden password prompt an
+assistant can't safely type into. Key Locker stores your SSH key passphrases and
+sudo / login passwords encrypted on your machine (Windows DPAPI, current user) and
+fills them in automatically when a bound command reaches its prompt. The secret is
+typed once into the locker's own secure dialog — it is never shown to the assistant
+and never travels through the MCP channel.
+
+```js
+// 1. Save the credential once — opens a secure dialog on your desktop
+key_locker({ action:'save', uri:'ssh://user@host:22' })
+
+// 2. Open an autofill-capable console (returns its paneId)
+key_locker({ action:'launch_console' })   // → { paneId:'12345678', windowTitle:'…' }
+
+// 3. Run the command through that pane — the password is filled at the prompt
+terminal({ action:'send', paneId:'12345678', input:'ssh user@host' })
+```
+
+- **Autofill only fires in a console opened by `launch_console`** — a pre-existing
+  terminal is never autofilled. The console is a classic visible Windows console,
+  so you can watch it and take over at any prompt yourself.
+- **Every autofill asks you to confirm by default**; opt a binding out with
+  `set_policy`. `list` / `status` / `forget` manage saved credentials.
+- `terminal` `read` / `send` accept `paneId` as an alternative to `windowTitle` —
+  it targets that exact window even after an `ssh` login renames its title.
+- Supported binding URIs: `ssh://user@host:22`, `sudo://host/user`,
+  `https-cred://host`, and SSH key passphrases (`sshkey:SHA256:…`). An `ssh`
+  save needs the host key already in `known_hosts` (connect to the host once first).
+- Windows only. Disable the whole feature with `DESKTOP_TOUCH_DISABLE_KEY_LOCKER=1`.
+  The secure dialog is an unsigned helper executable — Windows SmartScreen may show
+  an "unknown publisher" warning on first run (see the note under
+  [Requirements](../README.md#requirements)).
+
+---
+
+## Browser CDP automation
+
+For web automation, connect Chrome or Edge with the remote debugging port enabled — no Selenium or Playwright needed.
+
+```bash
+# Launch Chrome in CDP mode
+chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\tmp\cdp
+```
+
+```
+browser_open({launch:{}})                          → spawn-if-needed Chrome in debug mode + list tabs (idempotent)
+browser_open()                                     → connect-only (fail if no CDP endpoint live)
+browser_locate({selector:"#submit"})               → CSS selector → physical screen coords
+browser_click({selector:"#submit"})                → find + click in one step (auto-focuses browser)
+browser_eval({action:"js", expression:"document.title"})  → evaluate JS, returns result
+browser_eval({action:"dom", selector:"#main", maxLength:5000})  → outerHTML, truncated to maxLength chars
+browser_eval({action:"appState"})                  → one-shot SPA state (Next/Nuxt/Remix/Apollo/GitHub react-app/Redux SSR)
+browser_fill({selector:"#email", value:"user@example.com"})  → fill React/Vue/Svelte controlled input (state-safe)
+browser_overview()                                 → links/buttons/inputs + ARIA toggles + viewportPosition per element
+browser_search({by:"text", pattern:"..."})         → grep DOM with confidence ranking
+browser_navigate({url:"https://example.com"})      → navigate via CDP (no address bar interaction)
+```
+
+For chained calls in the same tab, pass `includeContext:false` to omit the activeTab/readyState annotation (~150 tok/call saved). Boolean / object params accept the LLM-friendly string spellings (`"true"`, `"{}"`).
+
+Coordinates returned by `browser_locate` account for the browser chrome (tab strip + address bar height) and `devicePixelRatio`, so they can be passed directly to `mouse_click` without any scaling.
+
+**Recommended web workflow:**
+```
+browser_open({launch:{}}) → browser_eval({action:"dom"}) → browser_locate(selector) → browser_click(selector)
+```
+
+---
+
+## Auto-dock CLI on startup
+
+Keep Claude CLI visible while operating other apps full-screen. Set env vars in your MCP config and the docked window auto-snaps into place every MCP startup.
+
+```json
+{
+  "mcpServers": {
+    "desktop-touch": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@harusame64/desktop-touch-mcp"],
+      "env": {
+        "DESKTOP_TOUCH_DOCK_TITLE": "@parent",
+        "DESKTOP_TOUCH_DOCK_CORNER": "bottom-right",
+        "DESKTOP_TOUCH_DOCK_WIDTH": "480",
+        "DESKTOP_TOUCH_DOCK_HEIGHT": "360",
+        "DESKTOP_TOUCH_DOCK_PIN": "true"
+      }
+    }
+  }
+}
+```
+
+| Env var | Default | Notes |
+|---|---|---|
+| `DESKTOP_TOUCH_DOCK_TITLE` | *(unset = off)* | `@parent` walks the MCP process tree to find the hosting terminal — immune to title / branch / project changes. Or use a literal substring. |
+| `DESKTOP_TOUCH_DOCK_CORNER` | `bottom-right` | `top-left` / `top-right` / `bottom-left` / `bottom-right` |
+| `DESKTOP_TOUCH_DOCK_WIDTH` / `HEIGHT` | `480` / `360` | px (`"480"`) or ratio of work area (`"25%"`) — 4K/8K auto-adapts |
+| `DESKTOP_TOUCH_DOCK_PIN` | `true` | Always-on-top toggle |
+| `DESKTOP_TOUCH_DOCK_MONITOR` | primary | Monitor id from `desktop_state({includeScreen:true})` |
+| `DESKTOP_TOUCH_DOCK_SCALE_DPI` | `false` | If true, multiply px values by `dpi / 96` (opt-in per-monitor scaling) |
+| `DESKTOP_TOUCH_DOCK_MARGIN` | `8` | Screen-edge padding (px) |
+| `DESKTOP_TOUCH_DOCK_TIMEOUT_MS` | `5000` | Max wait for the target window to appear |
+
+> **Input routing gotcha:** when a pinned window is active (e.g. Claude CLI), `keyboard(action='type')` / `keyboard(action='press')` send keys to it, **not** the app you wanted to type into. Always call `focus_window(title=...)` before keyboard operations, then verify `isActive=true` via `screenshot(detail='meta')`.
+
+### Screenshot cache (by-ref storage)
+
+`screenshot` and the other visual results return a cheap `screenshot://by-ref/{id}` link to an image saved on disk instead of inlining the pixels every time, so routine look-act-confirm loops cost far fewer tokens. The cache bounds itself automatically and `screenshot_query` / `screenshot_gc` let you inspect and prune it. Tune the storage with:
+
+| Env var | Default | Notes |
+|---|---|---|
+| `DESKTOP_TOUCH_SCREENSHOTS_DIR` | *(per-user cache dir)* | Pin the cache to a specific folder. If the default folder can't be created or written (e.g. corporate policy blocking new folders under your profile), the server auto-probes this → the runtime dir → an OS temp folder and uses the first writable one instead of giving up on the cache. |
+| `DESKTOP_TOUCH_SCREENSHOT_MAX_COUNT` | `200` | Keep at most this many captures in the cache. |
+| `DESKTOP_TOUCH_SCREENSHOT_MAX_BYTES` | `256 MiB` | Cap the total cache size on disk. |
+| `DESKTOP_TOUCH_SCREENSHOT_MAX_AGE_MS` | *(off)* | Drop captures older than this many milliseconds (opt-in). |
+| `DESKTOP_TOUCH_SCREENSHOT_AUTOPRUNE` | `on` | Auto-trim the cache as new captures are saved. Set `0` to disable. |
+| `DESKTOP_TOUCH_SCREENSHOT_MIN_EVICT_AGE_MS` | `60000` | Never auto-evict a capture younger than this (ms), so a by-ref link you were just handed survives long enough to open even when another AI/process on the same PC is also capturing. `0` disables. |
+
+### Multi-monitor screenshots
+
+`screenshot(displayId=…)` and `screenshot(region=…)` capture any monitor, including one placed left of or above the primary — those have negative desktop coordinates, and you pass them exactly as `screenshot(detail='meta')` reports them. `screenshot()` with no region is the primary monitor, as it has always been.
+
+A region that cannot be captured comes back as `RegionOutsideCapturableBounds` rather than a raw Windows error, and the message says which of three things happened. The region may be on no monitor at all, which usually means the coordinates went stale because the window moved or closed — take a fresh screenshot and use the new numbers. It may overlap a monitor but stretch past the edge of the screen area, in which case the coordinates are fine and the region is simply too big: ask for a smaller one, or capture the window itself with `screenshot(windowTitle=…)`. Or this server may be limited to the primary monitor, which the message says outright — along with why, because that decides the fix: if an env override pinned it, `screenshot(windowTitle=…)` normally still works on every monitor, whereas if the built-in capture module is missing then window capture usually needs that same module and fails too, so move the window onto the primary monitor or reinstall the server. Whole-screen capture and single-window capture are separate parts of that module, though, and a server can end up with one but not the other — so rather than working it out from the cause, read the message: it says plainly whether `screenshot(windowTitle=…)` is available on this server.
+
+If Windows returns no pixels at all — a locked screen, a UAC prompt, a disconnected remote-desktop session — you get `CaptureBackendFailed`; capturing the window itself with `screenshot(windowTitle=…)` usually still works, because it reads through a different Windows API.
+
+| Env var | Default | Notes |
+|---|---|---|
+| `DESKTOP_TOUCH_CAPTURE_BACKEND` | *(unset = automatic)* | Diagnostic override for the screen-capture path. Set to `nutjs` to force the older capture backend, which can only read the **primary** monitor — useful for isolating a capture problem. The server picks the backend once at startup, so change this in your MCP client config and restart. Any other value is ignored. |
+
+### Auto Perception (always-on)
+
+Phase 4 privatizes the explicit `perception_*` tool family — the v0.12 Auto
+Perception layer attaches an `attention` signal to every `desktop_state` and
+`desktop_act` response automatically. Action tools also auto-guard when given
+a `windowTitle`. There is no longer a need to register / read / forget lenses
+manually.
+
+```
+# desktop_state always returns the attention signal
+desktop_state() → {focusedWindow, focusedElement, modal, attention:"ok", ...}
+
+# Action tools auto-guard when windowTitle is given:
+keyboard({action:"type", text:"hello", windowTitle:"Notepad"})
+→ post.perception:{status:"ok"}  // unsafe input blocked if guards fail
+
+# When attention is dirty / stale / settling, refresh with desktop_state:
+desktop_state()  // re-evaluates attention via Auto Perception
+```
+
+For advanced pinned-target workflows, the `lensId` parameter remains on action
+tools (`keyboard`, `mouse_click`, `mouse_drag`, `click_element`,
+`browser_click`, `browser_navigate`, `browser_eval`, `desktop_act`). Omit
+`lensId` for the normal Auto Perception path. The underlying registry, hot
+target cache, and sensor loop are unchanged; only the explicit
+`perception_register / perception_read / perception_forget / perception_list`
+tools were retired.
+
+---
+
+## Mouse homing correction
+
+When Claude calls `screenshot(detail='text')` to read coordinates and then `mouse_click` seconds later, the target window may have moved. The homing system corrects this automatically.
+
+| Tier | How to enable | Latency | What it does |
+|------|--------------|---------|--------------|
+| 1 | Always-on (if cache exists) | <1ms | Applies (dx, dy) offset when window moved |
+| 2 | Pass `windowTitle` hint | ~100ms | Auto-focuses window if it went behind another |
+| 3 | Pass `elementName`/`elementId` + `windowTitle` | 1–3s | UIA re-query for fresh coords on resize |
+
+```
+# Tier 1 only (automatic)
+mouse_click(x=500, y=300)
+
+# Tier 1 + 2: also bring window to front if hidden
+mouse_click(x=500, y=300, windowTitle="Notepad")
+
+# Tier 1 + 2 + 3: also re-query UIA if window resized
+mouse_click(x=500, y=300, windowTitle="Notepad", elementName="Save")
+
+# Traction control OFF — no correction
+mouse_click(x=500, y=300, homing=false)
+```
+
+The `homing` parameter is available on `mouse_click`, `mouse_drag`, and `scroll`. The cache is updated automatically on every `screenshot()`, `desktop_discover()`, `focus_window()`, and `workspace_snapshot()` call.
+
+### `mouse_click` image-local coords (origin + scale)
+
+When you take a `dotByDot` screenshot with `dotByDotMaxDimension`, the response prints the `origin` and `scale` values. Instead of computing screen coords manually, copy them into `mouse_click`:
+
+```
+# Screenshot response:
+#   origin: (0, 120) | scale: 0.6667
+#   To click image pixel (ix, iy): mouse_click(x=ix, y=iy, origin={x:0, y:120}, scale=0.6667)
+
+mouse_click(x=640, y=300, origin={x:0, y:120}, scale=0.6667, windowTitle="Chrome")
+# Server converts: screen = (0 + 640/0.6667, 120 + 300/0.6667) = (960, 570)
+```
+
+This eliminates a whole class of off-by-one and scale bugs. Without origin/scale, `x`/`y` remain absolute screen pixels (unchanged behavior).
+
+---
+
+## `screenshot` key parameters
+
+```
+detail="image"          — PNG/WebP pixels (default)
+detail="text"           — UIA element JSON + clickAt coords (no image, ~100–300 tok)
+detail="meta"           — Title + region only (cheapest, ~20 tok/window)
+dotByDot=true           — 1:1 WebP; image_px + origin = screen_px
+dotByDotMaxDimension=N  — cap longest edge (response includes scale for coord math)
+grayscale=true          — ~50% smaller for text-heavy captures (code/AWS console)
+region={x,y,w,h}        — with windowTitle: window-local coords (exclude browser chrome)
+                          without: virtual screen coords
+diffMode=true           — I-frame first call, P-frame (changed windows only) after (~160 tok)
+ocrFallback="auto"      — detail='text' auto-fires Windows OCR on uiaSparse or empty
+```
+
+**Recommended Chrome combo** (50–70% data reduction):
+```
+screenshot(windowTitle="Chrome",
+           dotByDot=true, dotByDotMaxDimension=1280, grayscale=true,
+           region={x:0, y:120, width:1920, height:900})  # skip browser chrome
+```
+
+**Recommended workflow:**
+```
+workspace_snapshot()                     → full orientation (resets diff buffer)
+screenshot(detail="text", windowTitle=X) → get actionable[].clickAt coords
+mouse_click(x, y)                        → click directly, no math needed
+screenshot(diffMode=true)                → check only what changed (~160 tok)
+```
+
+---
+
+## Security
+
+### Emergency stop (Failsafe)
+
+**Park the mouse in the top-left corner of the primary monitor (within 10px of 0,0) for 500ms continuously to trigger the emergency stop.**
+
+- The trigger corner is on the **primary monitor only**. Areas that used to trigger the stop in older versions (monitors left of or above the primary) no longer do; if the cursor dwells there, a one-time balloon notification points you to the right corner.
+- **While a tool call is running**: the server exits (exit code 1) — the runaway-automation brake. A balloon notification and a diagnostic log entry (with cursor coordinates) record why it stopped. Only a call that is actually mid-flight triggers the exit; in the rare case where that call finishes during the ~1 second the notification takes, the server stays up instead and a follow-up balloon corrects the first one.
+- **While idle**: the server stays up and refuses new tool calls until the cursor leaves the corner. Background credential autofill (`key_locker`) is cancelled **before any of its dialogs open** — while you hold the corner, no credential prompt dialog appears and no credential is typed. It does not pick up again by itself: move the cursor away from the corner and run the command again.
+- **Per-tool check**: runs before every tool handler. **Background monitor**: 500ms polling as a backup for long-running operations. Trigger radius: 10px.
+- `DESKTOP_TOUCH_FAILSAFE_HOLD_MS` — dwell time in ms before the stop fires (default `500`; `0` = fire immediately on corner entry).
+
+### Blocked operations
+
+**`workspace_launch` blocklist:**
+`cmd.exe`, `powershell.exe`, `pwsh.exe`, `wscript.exe`, `cscript.exe`, `mshta.exe`, `regsvr32.exe`, `rundll32.exe`, `msiexec.exe`, `bash.exe`, `wsl.exe` are blocked.
+Script extensions (`.bat`, `.ps1`, `.vbs`, etc.) are rejected. Arguments containing `;`, `&`, `|`, `` ` ``, `$(`, `${` are also rejected.
+
+**`keyboard(action='press')` blocklist:**
+`Win+R` (Run dialog), `Win+X` (admin menu), `Win+S` (search), `Win+L` (lock screen) are blocked.
+
+### PowerShell injection protection
+
+All `-like` patterns in the UIA bridge PowerShell fallback path are sanitized with `escapeLike()`, which escapes wildcard characters (`*`, `?`, `[`, `]`) before they reach PowerShell. When the Rust native engine is active, PowerShell is not invoked for UIA operations.
+
+### Allowlist for `workspace_launch`
+
+Shell interpreters are blocked by default. To allow specific executables, create an allowlist file:
+
+**File locations (searched in order):**
+1. Path in `DESKTOP_TOUCH_ALLOWLIST` environment variable
+2. `~/.claude/desktop-touch-allowlist.json`
+3. `desktop-touch-allowlist.json` in the server's working directory
+
+**Format:**
+```json
+{
+  "allowedExecutables": [
+    "pwsh.exe",
+    "C:\\Tools\\myapp.exe"
+  ]
+}
+```
+
+Changes take effect immediately — no restart needed.
+
+---
+
+## Mouse movement speed
+
+All mouse tools (`mouse_click`, `mouse_drag`, `scroll`) accept an optional `speed` parameter:
+
+| Value | Behavior |
+|---|---|
+| Omitted | Uses the configured default (see below) |
+| `0` | Instant teleport — `setPosition()`, no animation |
+| `1–N` | Animated movement at N px/sec |
+
+**Default speed** is 1500 px/sec. Change it permanently via the `DESKTOP_TOUCH_MOUSE_SPEED` environment variable:
+
+```json
+{
+  "mcpServers": {
+    "desktop-touch": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@harusame64/desktop-touch-mcp"],
+      "env": {
+        "DESKTOP_TOUCH_MOUSE_SPEED": "3000"
+      }
+    }
+  }
+}
+```
+
+Common values: `0` = teleport, `1500` = default gentle, `3000` = fast, `5000` = very fast.
+
+---
+
+## Force-Focus (AttachThreadInput)
+
+Windows foreground-stealing protection can prevent `SetForegroundWindow` from succeeding when another window (such as a pinned Claude CLI) is in the foreground. This causes subsequent keystrokes or clicks to land in the wrong window — a silent failure.
+
+`mouse_click`, `keyboard(action='type')`, `keyboard(action='press')`, and `terminal(action='send')` all accept a `forceFocus` parameter that bypasses this protection using `AttachThreadInput`:
+
+```json
+{
+  "name": "mouse_click",
+  "arguments": {
+    "x": 500,
+    "y": 300,
+    "windowTitle": "Google Chrome",
+    "forceFocus": true
+  }
+}
+```
+
+If the force attempt is refused despite `AttachThreadInput`, the response is `ok:false` with `code: "ForegroundRestricted"` (issue #202 unification — same shape as `focus_window`, `keyboard`, `terminal_send`, `mouse_click`). The action itself is **suppressed** so the keystrokes / click never land on the wrong window. Recover via `focus_window`'s auto-escalate ladder before retrying. The legacy `hints.warnings: ["ForceFocusRefused"]` shape is no longer emitted.
+
+A window on another virtual desktop is not brought forward, because that would switch the user's desktop. `keyboard`, `terminal` send and the mouse tools (when homing brings the window forward) refuse with `code: "WindowOnOtherDesktop"`, and nothing is sent. `context.sameTitleOnScreen: true` means a window with the same title is on this desktop: name that one exactly (its `hwnd` where the tool takes one, or a more specific `windowTitle`). `focus_window` still brings such a window forward.
+
+**Global default via environment variable:**
+
+```json
+{
+  "mcpServers": {
+    "desktop-touch": {
+      "env": {
+        "DESKTOP_TOUCH_FORCE_FOCUS": "1"
+      }
+    }
+  }
+}
+```
+
+Setting `DESKTOP_TOUCH_FORCE_FOCUS=1` makes `forceFocus: true` the default for all four tools without changing each call.
+
+**Known tradeoffs:**
+
+- During the ~10ms `AttachThreadInput` window, key state and mouse capture are shared between the two threads. In rapid macro sequences this can cause a race condition (rare in practice).
+- Disable `forceFocus` (or unset the env var) when the user is manually operating another app to avoid unexpected focus shifts.
+
+### Typing into Windows Terminal from `desktop_act`
+
+Windows Terminal takes keyboard input only through the foreground: it ignores characters posted to it in the background. When `desktop_act` types into a Windows Terminal window, the server asks the user first, through the MCP client's question form (for example "Type "echo hi" into Windows Terminal (PowerShell)? Takes the foreground ~0.2 s."). This needs a client that supports MCP elicitation (it declares the `elicitation` capability, added in MCP 2025-06-18), connected over stdio. On Accept, it pastes the text through the foreground and puts the previous window back. Every paste is asked about; there is no way to allow it without the question. Decline, Esc, no answer within 120 s, or a client that cannot show the question (such as `claude -p`, or any client over the HTTP transport) all mean no: nothing is typed, and the act ends `foreground_not_allowed` with a `detail` that says why. After a no, do not type into the terminal another way without asking the user. The question shows the whole text with the window's title and selected tab, so it must be one line, and all of that together at most 600 characters; a single trailing newline is sent as Enter. When another window has the same title, the question says where the terminal is on screen; two such windows in the same place are refused. If the window, or its active tab, changed while the user was answering, nothing is typed. A tab split into panes is refused (which pane would receive the text cannot be read while the user answers), and so is a window whose active tab cannot be read. A terminal that is the window in front is refused: when the client runs in one of its tabs, the paste would arrive there. Use a terminal in another window. Before pasting, the server puts the terminal's keyboard focus on its input, so an open find box does not take the text; when it cannot, nothing is typed. Since every type is asked about, an agent should chain commands on one line (`a; b`) rather than act once per command.
+
+This question is asked on the `desktop_act` road only. `terminal(action:'run'/'send')` to Windows Terminal takes the foreground and pastes without asking, as it always has; after a no, it must not be used either.
+
+---
+
+## Auto Guard
+
+Action tools (`mouse_click`, `mouse_drag`, `keyboard(action='type'/'press')`, `click_element`, `desktop_act`, `browser_click`, `browser_navigate`) automatically guard each action when you pass `windowTitle` / `tabId`:
+
+- Verifies target window identity (process restart / HWND replacement detected)
+- Confirms click coordinates are inside the target window rect
+- Returns `post.perception.status` on every response — including failures — so the LLM can recover without a screenshot
+
+**Keyboard writes must name a destination.** `keyboard(action='type'/'press'/'sequence')` requires either `windowTitle` or `hwnd`. Without one there is no target to guard, and the keys would land on whatever window is foreground at that instant — including one you just clicked into yourself. Such a call is refused with `code:"DestinationRequired"` before any key is sent, and a `windowTitle` that is empty or only spaces counts as no target at all. A window that has **no title** can be addressed by `hwnd`, but only while it is already the foreground window — keyboard focus and guarding cannot target a titleless window yet, so bring it forward with `focus_window` first if it is not in front. Such a call also comes back with a warning saying the input was delivered unguarded.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DESKTOP_TOUCH_REQUIRE_DESTINATION` | *(unset = required)* | Set to `0` to type into the current foreground window on purpose. The refusal becomes a warning on the response instead of an error — never a silent pass. |
+| `DESKTOP_TOUCH_AUTO_GUARD` | *(unset = on)* | Set to `0` to turn the whole guard layer off, the destination check included. |
+
+**Disabling auto guard** — set `DESKTOP_TOUCH_AUTO_GUARD=0` to restore v0.11.12 behavior (no auto guard):
+
+```json
+{
+  "mcpServers": {
+    "desktop-touch": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@harusame64/desktop-touch-mcp"],
+      "env": {
+        "DESKTOP_TOUCH_AUTO_GUARD": "0"
+      }
+    }
+  }
+}
+```
+
+When auto guard is enabled (default), `post.perception.status` will be one of:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Guard passed — target verified |
+| `unguarded` | `windowTitle` not provided; action ran without guard |
+| `ambiguous_target` | Multiple windows matched; pass `hwnd` to name one exactly, or use a more specific title |
+| `target_not_found` | No window matched the given title |
+| `identity_changed` | Window was replaced (process restart / HWND change) |
+| `blocked_by_modal` | A modal dialog is in the way — dismiss it, then retry |
+| `unsafe_coordinates` | Click coordinates are outside the target window rect |
+| `browser_not_ready` | The browser tab is still loading — wait, then retry |
+| `needs_escalation` | Use `browser_click` or specify `windowTitle` |
+| `destination_required` | A `keyboard` write named no target. Refused before the guard runs, so it arrives as `code:"DestinationRequired"` with this status under `context.guard` rather than in `post.perception` — pass `windowTitle` or `hwnd` |
+
+When `unsafe_coordinates` or `identity_changed` is returned, the response may include a `suggestedFix.fixId`. Pass that `fixId` to the relevant tool call to approve the recovery:
+
+```json
+{ "name": "mouse_click",           "arguments": { "fixId": "fix-..." } }
+{ "name": "keyboard(action='type')",         "arguments": { "fixId": "fix-...", "text": "hello" } }
+{ "name": "click_element",         "arguments": { "fixId": "fix-..." } }
+{ "name": "browser_click", "arguments": { "fixId": "fix-..." } }
+```
+
+The fix is one-shot and expires in 15 seconds. The server revalidates the target process identity before executing.
+
+---
+
+## Diagnostic log
+
+The server keeps an append-only log of events that never reach a tool response, at
+`%USERPROFILE%\.desktop-touch-mcp\logs\diagnostic.log` (one JSON object per line). It records
+crashes and slow calls, and — since the diagnostic log became the place to look when input lands in
+the wrong place — how each `windowTitle` was resolved and where each write went:
+
+- a **`resolve`** record per title lookup: how many windows matched, which one was picked, the ones
+  that lost, and a flag when the terminal process-name fallback fired because nothing matched by
+  title;
+- a **`dispatch_sink`** record per input dispatch — `keyboard`, `terminal`, `scroll` and
+  `desktop_act`'s background writes: which channel was used, which window it was addressed to, and
+  which window was in the foreground at that moment;
+- a correlation id shared by all records from one tool call, so a resolution can be matched to the
+  write it produced even when calls overlap.
+
+If an input call ever seems to type into the wrong window, this is the file that says which window
+it picked and why. A record is written immediately before the write leaves the process, so a
+dispatch that is refused or fails first is not on record as having happened.
+
+The log rolls over: once `diagnostic.log` passes 64 MiB it becomes `diagnostic.log.1`, and at most
+two rolled generations are kept. **With one server running, the newest records are always in
+`diagnostic.log`**, but when you are searching for something that happened a while ago, search
+`diagnostic.log*` rather than the one file. That glob also catches
+`diagnostic.log.<pid>.rotating`, which is where a server parks the live file for the moment it is
+being rolled. One of these left behind means a roll did not finish: the server was killed partway
+through, or the roll failed after the file was parked and the server could not put it back — it will
+not if a fresh `diagnostic.log` has been started in the meantime, and the move back can fail for the
+same reason the roll did. Nothing in it is lost. The pid in the name says which server it belonged
+to, and it is filed back into the numbered generations by the next roll — by that server if it is
+still running, and otherwise by any other server once the original has exited or, because process
+ids are reused, once the file has been parked for an hour — so a crashed server's log is not left
+sitting on disk forever.
+
+Every record is measured against the limit before it is written, so a server left running for days
+rolls the file as it goes — there is no scheduled job, nothing to restart, and nothing to clean up by
+hand. A server sitting idle never rolls anything, because the check only runs when there is something
+to write.
+
+**The ceiling is a size, not an age.** Three generations hold 192 MiB of records, and how far back
+that reaches depends entirely on how busy the machine is: on the install that prompted this limit,
+averaging roughly 170 MB a day, it is a little over one day. If you want to keep a particular
+incident, copy the file out rather than expecting to find it next week; if you would rather trade
+disk space for reach, raise `DESKTOP_TOUCH_DIAGNOSTIC_LOG_MAX_BYTES`.
+
+Two situations go past that figure, and both are worth knowing about:
+
+- **Several servers sharing one log.** Every MCP client starts its own server, and by default they
+  all write to the same file. Each tracks the bytes it has written itself and only re-measures the
+  real file every few MB, so the live file can overshoot before one of them rolls it. The overshoot
+  grows with the number of servers running, not without limit. Two servers can also roll at the same
+  moment and step on each other's rename: that costs a generation, and can leave one server's newest
+  record in `diagnostic.log.1` instead of the live file. Grepping `diagnostic.log*` rather than the
+  one file covers both.
+- **A live file that cannot be renamed** — held open by another program, or permission denied.
+  Rotation then cannot happen and the log keeps growing at full speed; a parked `.rotating` file
+  that is held open stops a roll the same way, and is checked before any numbered generation is
+  touched. Nothing is lost — a roll that
+  fails leaves the live file where it was, or at worst parked under the `.rotating` name above for a
+  later roll to file — but this is the one case the limit does not cover, so it is not silent: a
+  `log_rotation_failed` record is written into the log itself, once per stretch of failed rolls
+  rather than once per line. It is the first thing to grep for if you find an oversized
+  `diagnostic.log` after updating.
+
+One record is never allowed to be larger than the file it lives in, so an event carrying an
+unusually large payload is written as a shortened stand-in: same `kind`, plus `record_truncated`,
+the original size, and a `head` field holding the first few KB of what it would have been.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DESKTOP_TOUCH_RESOLVE_LOG_RAW` | *(unset = off)* | Window titles and the titles you search for are recorded as a short hash plus their length, because a title can contain a file name, a mail subject, or a browser page title. Set to `1` to also record the text in clear (the hash stays, so a log with both is still readable end to end). |
+| `DESKTOP_TOUCH_DIAGNOSTIC_LOG_DISABLE` | *(unset = on)* | Set to `1` to stop writing the log entirely. |
+| `DESKTOP_TOUCH_DIAGNOSTIC_LOG_PATH` | *(per-user log dir)* | Write the log somewhere else. A symbolic link works: the roll follows it, so the link keeps pointing at the live log and the rolled generations appear beside the real file rather than beside the link. |
+| `DESKTOP_TOUCH_DIAGNOSTIC_LOG_MAX_BYTES` | `67108864` (64 MiB) | Roll the live log to `diagnostic.log.1` once it passes this size. Two rolled generations are kept, so the log directory ordinarily holds about three times this value — see above for the two situations that go past it. A value below 1 MiB is raised to 1 MiB and one above 1 GiB is lowered to 1 GiB, and anything that is not a positive whole number falls back to the default — a typo here cannot switch rotation off in either direction, whether you mean bytes and write MiB or the other way round. To stop logging entirely, use `DESKTOP_TOUCH_DIAGNOSTIC_LOG_DISABLE`. |
+
+---
+
+## Advanced response options
+
+### browser_eval Structured Mode
+
+Pass `withPerception: true` to receive a structured JSON response with `post.perception` instead of raw text:
+
+```json
+{ "name": "browser_eval", "arguments": { "expression": "document.title", "withPerception": true } }
+```
+
+Returns `{ ok: true, result: "...", post: { perception: { status: "ok", ... } } }`.
+
+### mouse_drag Cross-Window Guard
+
+`mouse_drag` now guards both start and end coordinates. Drags that cross window boundaries (or reach the desktop wallpaper) are blocked by default. To allow intentional cross-window or range-selection drags:
+
+```json
+{ "name": "mouse_drag", "arguments": { "startX": 100, "startY": 100, "endX": 900, "endY": 900, "allowCrossWindowDrag": true } }
+```
+
+---
+
+## Performance of the native engine (measured at v0.15)
+
+The Rust native engine (`@harusame64/desktop-touch-engine`) replaces PowerShell process spawning with direct COM calls over a persistent MTA thread. It loads automatically as a `.node` addon — no configuration needed.
+
+### UIA Benchmark (vs PowerShell baseline)
+
+| Function | Rust Native | PowerShell | Speedup |
+|---|---|---|---|
+| `getFocusedElement` | **2.2 ms** | 366 ms | **163.9×** |
+| `getUiElements` (Explorer, ~60 elements) | **106.5 ms** | 346 ms | **3.3×** |
+| **Weighted average** | | | **~82×** |
+
+### Image Diff Benchmark (SSE2 SIMD)
+
+| Function | Rust (SSE2) | TypeScript | Speedup |
+|---|---|---|---|
+| `computeChangeFraction` (1920×1080) | **0.26 ms** | 3.8 ms | **~15×** |
+| `dHash` (perceptual hash) | **0.09 ms** | 1.2 ms | **~13×** |
+
+### Architecture
+
+```
+Claude CLI / MCP Client
+    │  stdio or HTTP (MCP protocol)
+    ▼
+desktop-touch-mcp (TypeScript)
+    │
+    ├── Rust Native Engine (.node addon)          ← NEW in v0.15
+    │   ├── UIA: 13 functions via napi-rs + windows-rs 0.62
+    │   │   └── Dedicated COM thread (MTA) + batch BFS algorithm
+    │   └── Image: SSE2 SIMD pixel diff + perceptual hashing
+    │
+    └── PowerShell Fallback (automatic)
+        └── Activates transparently if .node is unavailable
+```
+
+### Why `getUiElements` is 3.3× (not 160×)
+
+The 160× speedup on `getFocusedElement` comes from eliminating PowerShell process startup (~200 ms) and .NET assembly loading. For `getUiElements`, the bottleneck shifts to the **UIA provider** inside the target application (e.g., Explorer) — it must enumerate its UI tree regardless of who asks. The Rust engine uses a **batch BFS algorithm** (`FindAllBuildCache` + `TreeScope_Children`) that minimizes cross-process RPC calls and supports `maxElements` early exit, making it dramatically faster on large trees (VS Code, browsers with 1000+ elements).
+
+---
+
+## UI Operating Layer (V2)
+
+> **Status: Default ON since v0.17.** `desktop_discover` and `desktop_act` are available out of the box.
+
+V2 introduces two new tools that replace coordinate-based clicking with entity-based interaction:
+
+| Tool | Description |
+|---|---|
+| `desktop_discover` | Observe a window or browser tab. Returns interactive entities with leases — no raw screen coordinates. Supports UIA (native), CDP (browser), terminal, and visual GPU lanes. |
+| `desktop_act` | Interact with an entity returned by `desktop_discover`. Validates the lease before executing. Returns a semantic diff (`entity_disappeared`, `modal_appeared`, `focus_shifted`, …). When `diffUnchecked` is present, the diff did not look for the kinds it lists, so their absence from the diff does not mean they did not happen. On visual-only targets a successful act can bundle a `roiCapture` (a PNG crop of the changed region + a lease-less next-target preview) so you confirm the result and find the next target in one call — controlled by `returnCapture` (`on-change`, the default on a visible change; `never` to suppress; `always` to force). |
+
+### Clicking — priority order
+
+When multiple tools could perform the same click, prefer them in this order:
+
+1. `browser_click(selector)` — Chrome / Edge over CDP (stable across repaints)
+2. `desktop_act(lease)` — native windows, dialogs, visual-only targets (entity-based; use after `desktop_discover`)
+3. `click_element(name | automationId)` — native UIA fallback when `desktop_act` returns `ok:false`
+4. `mouse_click(x, y)` — pixel-level last resort (`origin` + `scale` from `dotByDot` screenshots only)
+
+### Disabling V2 (kill switch)
+
+To hide `desktop_discover` / `desktop_act` from the tool catalog, add the disable flag and restart:
+
+```json
+{
+  "mcpServers": {
+    "desktop-touch": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@harusame64/desktop-touch-mcp"],
+      "env": {
+        "DESKTOP_TOUCH_DISABLE_FUKUWARAI_V2": "1"
+      }
+    }
+  }
+}
+```
+
+All V1 tools continue to work without interruption — no reinstall required. Remove the env entry and restart to re-enable.
+
+Flag semantics (exact-match: only the literal string `"1"` counts):
+
+| `DISABLE_FUKUWARAI_V2` | V2 state |
+|---|---|
+| unset / not `"1"` | **ON** (default) |
+| `"1"` | **OFF** (kill switch) |
+
+### Removed: `DESKTOP_TOUCH_ENABLE_FUKUWARAI_V2`
+
+This was the opt-in switch in v0.16.x. V2 is on by default since v0.17, so the flag no longer has any effect and is safe to delete from your config. To turn V2 off, set `DESKTOP_TOUCH_DISABLE_FUKUWARAI_V2=1`.
+
+### Recovery when V2 fails
+
+If `desktop_act` returns `ok: false`, read `reason` and follow the built-in recovery hints in the tool description. Common paths:
+
+- `lease_expired` / `*_mismatch` / `entity_not_found` → re-call `desktop_discover`
+- `modal_blocking` → `response.blockingElement` (when present) carries `{ name, role, automationId?, hwnd? }`. With `role: "dialog"` the blocker is a separate dialog window that has disabled the target's window, and `hwnd` is it — `desktop_discover` with `target.hwnd = blockingElement.hwnd`, answer it, then retry. Any other role: a window the discover snapshot holds, which the OS could not confirm — `desktop_discover` with `target.hwnd = blockingElement.hwnd` when `hwnd` is present, otherwise `click_element(name=blockingElement.name)`; then re-discover the original target and act on the new lease (the same lease is refused again)
+- `entity_outside_viewport` → the element moved off screen: `scroll` / `scroll(action='to_element')` when it scrolled out of its own window, or re-call `desktop_discover` when the window itself moved or closed
+- `origin_window_not_visible` → `focus_window(windowTitle)` to restore the minimised / hidden window, then re-call `desktop_discover`
+- `coordinate_outside_reachable_bounds` → the target is on no connected monitor — usually stale coordinates: re-run `desktop_discover`. (Without the built-in Windows input module, only the primary monitor is reachable; the message says so.)
+- `cursor_placement_blocked` → the pointer could not be placed there (an app is holding the cursor, or the session is not interactive), so nothing was clicked: free the cursor or reconnect the session, or use `click_element` (UIA invoke, cursor-free)
+- `keyboard_target_unsafe` → nothing was typed: the characters would have gone to a different control or window, or to a read-only control, or the field you named (or its window) is disabled (`if_unexpected.detail` says which; for disabled, wait out whatever disabled it and re-discover). Put the focus on the field you named, then type again — not through a foreground `keyboard` type. By title: `desktop_act` with `action='click'`. By handle: re-discover by title first — except for a common dialog, which a title resolves to by handle as well, where nothing here can focus its text field yet. For another window: `focus_window` first
+- `executor_failed` → fall back to `click_element` / `mouse_click` / `browser_click`
+
+For `desktop_discover` warnings (`visual_provider_unavailable`, `visual_provider_warming`, `cdp_provider_failed`, …), the coordinate-based tools (`screenshot(detail='text')`, `click_element`, `mouse_click`, `terminal`, …) remain available as an escape hatch.
+
+---
+
+## Token cost reference
+
+| Mode | Tokens | Use case |
+|---|---|---|
+| `screenshot` (768px PNG) | ~443 tok | General visual check |
+| `screenshot(dotByDot=true)` window | ~800 tok | Precise clicking (no coordinate math) |
+| `screenshot(diffMode=true)` | ~160 tok | Post-action diff |
+| `screenshot(detail="text")` | ~100–300 tok | UI interaction (no image) |
+| `workspace_snapshot` | ~2000 tok | Full session orientation |
+
+---

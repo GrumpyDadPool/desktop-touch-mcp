@@ -15,7 +15,7 @@
 // would be making the grid's own mistake one level up — "N matched" read as "N exist". The hole is
 // carried in the fixture as a hole, it is named in the summary, and it is deliberately OUTSIDE the
 // ratchet: a gate whose colour depends on the machine's registry is a gate nobody can act on.
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -102,10 +102,14 @@ const derivedWritten = {};
 for (const [name, sites] of [...readIn].sort()) if (!platform.has(name)) derived[name] = [...sites].sort();
 for (const [name, sites] of [...writtenIn].sort()) if (!platform.has(name)) derivedWritten[name] = [...sites].sort();
 
-const english = readDocumentedSwitches(readFileSync(join(REPO, "README.md"), "utf8"));
+// The README and its guide are one document split in two (2.1.0 moved the details to docs/guide*.md):
+// a switch documented, or buried, in either counts. A tree without a guide reads the README alone.
+const readDocs = (...rels) =>
+  rels.filter((rel) => existsSync(join(REPO, rel))).map((rel) => readFileSync(join(REPO, rel), "utf8")).join("\n");
+const english = readDocumentedSwitches(readDocs("README.md", "docs/guide.md"));
 // **A fix found in one language does not propagate.** The ja page writes its tombstones `削除済み:`,
 // so with only the English spelling a switch buried there could never match one.
-const japanese = readDocumentedSwitches(readFileSync(join(REPO, "README.ja.md"), "utf8"));
+const japanese = readDocumentedSwitches(readDocs("README.ja.md", "docs/guide.ja.md"));
 const documented = [...new Set([...english.documented, ...japanese.documented])].sort();
 const tombstoned = [...new Set([...english.tombstoned, ...japanese.tombstoned])].sort();
 for (const name of tombstoned) {

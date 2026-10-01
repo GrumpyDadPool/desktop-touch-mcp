@@ -1,22 +1,4 @@
-## Standard workflow (v1.0.0)
-
-The v2 World-Graph surface (`desktop_discover` / `desktop_act`) is the recommended dispatch path. The four-call shape works for native apps, browsers, and terminals identically.
-
-```
-desktop_state          → orient: focused window/element, modal, attention signal
-desktop_discover       → find actionable entities (returns lease + windows[])
-desktop_act(lease, …)  → act on entity (returns attention + post.perception)
-desktop_state          → confirm the world changed as expected
-```
-
-Clicking — priority order:
-
-```
-browser_click(selector)               → Chrome / Edge (CDP, stable across repaints)
-desktop_act(lease, action='click')    → native / dialog / visual (entity-based; use after desktop_discover)
-click_element(name | automationId)    → native UIA fallback if desktop_act returns ok:false
-mouse_click(x, y, origin?, scale?)    → pixel last resort; origin+scale from dotByDot screenshots only
-```
+## Recovery hints and leases
 
 Recovery hints — read `response.attention` after every observation and `response.warnings[]` on `desktop_discover` / `desktop_act`. Common reasons:
 

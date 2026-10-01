@@ -1,22 +1,4 @@
-## 推奨ワークフロー (v1.0.0)
-
-v2 World-Graph (`desktop_discover` / `desktop_act`) が標準ディスパッチパス。ネイティブアプリ・ブラウザ・ターミナルを同じ 4 ステップで扱えます。
-
-```
-desktop_state          → 状況把握: focused window/element / modal / attention
-desktop_discover       → 操作可能 entity を取得 (lease + windows[] 付き)
-desktop_act(lease, …)  → entity 操作 (attention + post.perception を返す)
-desktop_state          → 期待通りに状態が変わったか確認
-```
-
-クリック優先順:
-
-```
-browser_click(selector)               → Chrome / Edge (CDP、再描画に強い)
-desktop_act(lease, action='click')    → ネイティブ / ダイアログ / ビジュアル (entity ベース)
-click_element(name | automationId)    → desktop_act が ok:false の時の UIA フォールバック
-mouse_click(x, y, origin?, scale?)    → 最終手段。dotByDot screenshot の origin+scale を使うこと
-```
+## リカバリと lease
 
 リカバリ — `response.attention` を毎観測でチェック、`desktop_discover` / `desktop_act` の `response.warnings[]` を読む:
 
@@ -48,3 +30,4 @@ Lease ライフサイクル:
 Reactive Perception Graph は desktop-touch の低コストな状況把握レイヤーです。対象の同一性・フォーカス・矩形・準備状態・guard 結果を操作間で維持し、Claude が小さな操作のたびにスクリーンショットで確認し直さなくて済むようにします。
 
 ---
+
