@@ -310,8 +310,10 @@ describe("a type into Word's body fails only when the page text did not change a
   it("refuses, posting nothing, when a dialog disabled Word while its page text was read (PR codex)", async () => {
     let asks = 0;
     // The rung asks before the read (true) and again after it (false: a dialog opened meanwhile).
-    const { out, keyboardPost } = await typeReadBack("abc", ["Hello."], () => (asks++ === 0));
+    const { out, keyboardPost, readHostText } = await typeReadBack("abc", ["Hello."], () => (asks++ === 0));
     expect((out as Error).name).toBe("KeyboardTargetUnsafeError");
+    expect((out as Error).message).toMatch(/stopped taking input while its page text was read/);
+    expect(readHostText).toHaveBeenCalledTimes(1);
     expect(keyboardPost).not.toHaveBeenCalled();
   });
 
@@ -320,6 +322,36 @@ describe("a type into Word's body fails only when the page text did not change a
     // start past the 4 s deadline.
     const { readHostText } = await typeReadBack("abc", ["Hello.", "Hello."], () => true, undefined, 1500);
     expect(readHostText.mock.calls.length).toBeLessThan(1 + 6);
+  });
+
+  async function settledBy(readMs: (call: number) => number, ms: number): Promise<boolean> {
+    vi.useFakeTimers();
+    const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+    const receipt = { windowHwnd: FRAME, receiverHwnd: WWG, receiverRootHwnd: FRAME, receiverAncestors: [FRAME], ancestorsComplete: true, originRootHwnd: FRAME, aimRootHwnd: FRAME, lookupRootHwnd: FRAME, ownerChain: [] };
+    let call = 0;
+    const readHostText = vi.fn(async () => { const wait = readMs(call++); await new Promise((r) => setTimeout(r, wait)); return "Hello."; });
+    const exec = createDesktopExecutor({ hwnd: String(FRAME) }, {
+      uiaClick: vi.fn(), uiaSetValue: vi.fn(), cdpClick: vi.fn(), cdpFill: vi.fn(), terminalSend: vi.fn(),
+      keyboardTypeBg: vi.fn(), mouseClick: vi.fn(), keyboardResolve: vi.fn(async () => receipt), keyboardPost: vi.fn(async () => {}),
+      readHostText, windowTakesInput: () => true,
+    });
+    let settled = false;
+    const pending = exec(bodyOf({ hostWindowHandle: String(WWG), hostWindowClass: "_WwG" }), "type", "abc").then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(ms);
+    const answer = settled;
+    await vi.runAllTimersAsync();
+    await pending;
+    vi.useRealTimers();
+    return answer;
+  }
+
+  it("cuts a slow before-read at 2 s (a native read takes up to 8 s; PR codex)", async () => {
+    expect(await settledBy(() => 8000, 2500)).toBe(true);
+  });
+
+  it("cuts slow after-reads at the 4 s deadline", async () => {
+    // The before-read is quick; every read after the post takes 8 s.
+    expect(await settledBy((call) => (call === 0 ? 0 : 8000), 4600)).toBe(true);
   });
 
   it("does not read the page text on a keyboard road that is not a host's (a field with no recorded host)", async () => {

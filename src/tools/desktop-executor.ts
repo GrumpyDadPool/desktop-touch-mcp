@@ -2052,11 +2052,12 @@ async function keyboardRung(
   // short — gate 2 and PR codex on the first version). The landing stays unconfirmed. Only "no change
   // at all" fails, and it says the text may have landed out of view.
   const hostRoot = hostHwnd !== undefined && d.readHostText !== undefined && text.length > 0 ? receipt.receiverRootHwnd ?? receipt.windowHwnd : undefined;
-  const textBefore = hostRoot !== undefined ? await d.readHostText!(hostRoot) : undefined;
+  // The before-read is cut at 2 s as well (the native walk's own limit is 8 s): without it, no check.
+  const textBefore = hostRoot !== undefined ? await withinMs(d.readHostText!(hostRoot), 2000) : undefined;
   // The read takes time, and a dialog opened during it disables Word's frame: the host is asked again
   // right before the post, so the characters are not posted behind it (PR codex on the read-back).
   if (hostRoot !== undefined && hostHwnd !== undefined && (await takesInput(hostHwnd)) === false) {
-    probeRefusal("keyboard", "keyboard_target_unsafe", aimHwnd, entity, { why, ground: "disabled", referenceFrom: "entity", addressedWindowBy, check: "after_host_text_read" });
+    probeRefusal("keyboard", "keyboard_target_unsafe", aimHwnd, entity, { why, ground: "disabled", referenceFrom: "entity", addressedWindowBy, check: "after_host_text_read", ...keyboardLanding(entity, receipt, valueRoadError) });
     throw new KeyboardTargetUnsafeError(
       "disabled",
       "host_window",
@@ -2093,13 +2094,23 @@ async function keyboardRung(
  * typing). `false` as soon as one read differs, and when no read after the post succeeded — an
  * unreadable page is not evidence that nothing changed.
  */
+/** `p`, or `undefined` once `ms` have passed. The work behind `p` is not cancelled. */
+function withinMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    p.then((v) => { clearTimeout(timer); resolve(v); }, () => { clearTimeout(timer); resolve(undefined); });
+  });
+}
+
 async function hostTextUnchanged(d: ExecutorDeps, root: bigint, before: string): Promise<boolean> {
   let readOnce = false;
   // A deadline over the whole check, so a slow or failing read cannot hold the act (gate 2).
   const deadline = Date.now() + 4000;
   for (let attempt = 0; attempt < 6 && Date.now() < deadline; attempt++) {
     await new Promise((r) => setTimeout(r, 200));
-    const after = await d.readHostText!(root);
+    // An awaited read is cut at the deadline too: the native walk has its own 8 s, which no caller's
+    // timeout shortens (PR codex). A read cut short counts as unread.
+    const after = await withinMs(d.readHostText!(root), Math.max(0, deadline - Date.now()));
     if (after === undefined) continue;
     readOnce = true;
     if (after !== before) return false;
@@ -3447,7 +3458,8 @@ function getSharedRealDeps(): ExecutorDeps {
         const { getUiElements } = await import("../engine/uia-bridge.js");
         // The same deep read discover takes, scoped to the window and with Word's page text (#217);
         // such a read is never answered from the cache.
-        // Native only, and a short timeout: the PowerShell road never reads the page text (gate 2).
+        // Native only: the PowerShell road never reads the page text (gate 2). The caller bounds the
+        // wait; the timeout here binds only the PowerShell road, which nativeOnly does not take.
         const r = await getUiElements("", 64, 500, 2000, { pinnedHwnd: rootHwnd, readBodyText: true, nativeOnly: true });
         const texts = r.elements.map((e) => e.visibleText).filter((t): t is string => typeof t === "string");
         return texts.length > 0 ? texts.join("\n") : undefined;
