@@ -104,12 +104,18 @@ for (const [name, sites] of [...writtenIn].sort()) if (!platform.has(name)) deri
 
 // The README and its guide are one document split in two (2.1.0 moved the details to docs/guide*.md):
 // a switch documented, or buried, in either counts. A tree without a guide reads the README alone.
-const readDocs = (...rels) =>
-  rels.filter((rel) => existsSync(join(REPO, rel))).map((rel) => readFileSync(join(REPO, rel), "utf8")).join("\n");
-const english = readDocumentedSwitches(readDocs("README.md", "docs/guide.md"));
+// Each file is parsed on its own and the sets merged, so an unbalanced code fence in one cannot flip
+// the other's (gate 2 on the split).
+const readDocs = (...rels) => {
+  const parts = rels.filter((rel) => existsSync(join(REPO, rel))).map((rel) => readDocumentedSwitches(readFileSync(join(REPO, rel), "utf8")));
+  const tombstoned = [...new Set(parts.flatMap((p) => p.tombstoned))].sort();
+  const documented = [...new Set(parts.flatMap((p) => p.documented))].filter((n) => !tombstoned.includes(n)).sort();
+  return { documented, tombstoned };
+};
+const english = readDocs("README.md", "docs/guide.md");
 // **A fix found in one language does not propagate.** The ja page writes its tombstones `削除済み:`,
 // so with only the English spelling a switch buried there could never match one.
-const japanese = readDocumentedSwitches(readDocs("README.ja.md", "docs/guide.ja.md"));
+const japanese = readDocs("README.ja.md", "docs/guide.ja.md");
 const documented = [...new Set([...english.documented, ...japanese.documented])].sort();
 const tombstoned = [...new Set([...english.tombstoned, ...japanese.tombstoned])].sort();
 for (const name of tombstoned) {

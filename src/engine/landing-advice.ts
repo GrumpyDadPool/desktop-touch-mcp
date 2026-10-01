@@ -16,6 +16,10 @@
  * with itself, and did. The hint clause was hedged in the READMEs and unhedged in both of
  * these for a round, and a round before that only one of them said what a retry does.
  *
+ * (Since 2.1.0 the hand-written paragraph lives in `docs/guide.md` and `docs/guide.ja.md`, which
+ * the READMEs link to; read "README" below as those two files. The figures were measured when it
+ * was in the READMEs, and the text did not change in the move.)
+ *
  * WHAT IS NOT GENERATED FROM HERE, measured at the same time: `README.md` shares 76% of
  * this text and `README.ja.md` shares 18%. The first is a shorter paraphrase written for a
  * reader rather than for a model; the second is a translation. Neither is a rendering of
@@ -36,7 +40,7 @@
  *
  * Nothing mechanical closes that: agreement between a sentence for a model and a sentence for a
  * reader needs a reader. What this file does instead is make the obligation land where the edit
- * happens — CHANGING THE TEXT BELOW MEANS RE-READING `README.md` AND `README.ja.md` AND CONFIRMING
+ * happens — CHANGING THE TEXT BELOW MEANS RE-READING `docs/guide.md` AND `docs/guide.ja.md` AND CONFIRMING
  * THEY STILL SAY THE SAME THING, in the same commit that updates the fixtures. The refactor also
  * removed an accidental protection worth naming: the shipped text used to sit in the same object
  * literal as the README text, so editing one put the other in the editor's view.

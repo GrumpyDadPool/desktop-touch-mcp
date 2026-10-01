@@ -218,8 +218,8 @@ describe("ADR-036: desktop_state names the road that left the value out", () => 
     // happens, the fixture is what to fix, not the source.
     expect(
       instructions,
-      "the instructions voice changed — if you meant to change the shipped text, RE-READ README.md " +
-        "and README.ja.md and confirm they still say the same thing. Nothing here checks that: " +
+      "the instructions voice changed — if you meant to change the shipped text, RE-READ docs/guide.md " +
+        "and docs/guide.ja.md and confirm they still say the same thing. Nothing here checks that: " +
         "pinning a README notices an edit to the README, not this text drifting away from it."
     ).toBe(
       readFileSync(
@@ -516,8 +516,9 @@ describe("ADR-036: desktop_state names the road that left the value out", () => 
    *     than the wire string (it catches a spread, or a second options key, that the wire would only
    *     show as a replacement); what was missing was the correspondence, and that is now measured.
    *     The two tool descriptions were checked the same way in the same run: 8/8 byte identical.
-   *   - `README.section.md` / `README.ja.section.md` — the whole `## Standard workflow` section,
-   *     heading to next heading.
+   *   - `guide.section.md` / `guide.ja.section.md` — the whole section of `docs/guide*.md` the
+   *     paragraph is in (`## Recovery hints and leases` / `## リカバリと lease`; it was the README's
+   *     `## Standard workflow` until 2.1.0), heading to next heading.
    *
    * THE PRICE, STATED: any deliberate edit to those four surfaces reddens this cell, including
    * edits that have nothing to do with `landing`. That is the cost of asserting that nothing was
