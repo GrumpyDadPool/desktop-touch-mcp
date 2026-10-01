@@ -12,17 +12,20 @@ npx -y @harusame64/desktop-touch-mcp
 
 32 ツール、Rust ネイティブエンジン (UIA 2ms)、PowerShell 透過フォールバック、日本語/CJK 完全対応、MIT。上記 1 行を Claude / Cursor / VS Code Copilot の MCP 設定に追加するだけで、Notepad、Excel、Chrome、Windows Terminal、その他あらゆるアプリを Claude が操作できるようになります。
 
-> *v0.15: Rust ネイティブエンジンにより**平均 82 倍高速化** — UIA フォーカス取得 2ms、SSE2 SIMD 画像差分 13〜15 倍速。設定不要：エンジンは自動ロード、不在時は PowerShell に透過フォールバック。*
-> *v0.15.5: **固定リリース検証** — npm ランチャーは対応する GitHub Release tag だけを取得し、Windows runtime zip を検証してから展開します。*
+> *v2.1: UI Automation を深さでなく要素数で読むようにした。Chrome・Edge・VS Code のページ、Explorer と設定の値、Word の本文が読めて、操作できる。UIA で読めないものは、これまでどおり OCR と Set-of-Marks に回る。Word の本文と、利用者に訊いたうえで Windows Terminal にも打てる。（[CHANGELOG](CHANGELOG.md)）*
+> *v2.0: できない操作は「できた」と返さず、理由をつけて断る。`hwnd` で指した操作は、その窓にだけ届く。*
 
 ---
 
 ## 特徴
 
-- **⚡ 高性能 Rust ネイティブコア** — UIA ブリッジと画像差分エンジンを Rust (`napi-rs` + `windows-rs`) で実装し、ネイティブ `.node` アドオンとしてロード。専用 MTA スレッドからの直接 COM 呼び出しにより PowerShell プロセス起動を排除 — `getFocusedElement` は **2ms**（160 倍高速）、`getUiElements` はバッチ型 BFS アルゴリズムでクロスプロセス RPC を最小化し **約 100ms** で完了。画像差分は **SSE2 SIMD** で 13〜15 倍のスループット。ネイティブエンジンが利用不可の場合、全関数が PowerShell に透過フォールバック — 設定不要。
-- **🎯 Set-of-Marks (SoM) ビジュアルフォールバック** — ゲーム・RDP・非対応 Electron アプリで UIA が完全に機能しない場合でも、`screenshot(detail="text")` が Hybrid Non-CDP パイプラインを自動起動。Rust 画像前処理 → Windows OCR → クラスタリング → 赤い枠線 + 番号バッジ（`[1]`、`[2]`…）付き PNG 画像を生成し、`clickAt` 座標付きの要素リストを返します。CDP 不要。
-- **🔁 視覚のみ対象での 1 コール確認** — UIA が効かない対象（Electron・PWA・ゲーム・自前描画キャンバス・RDP ウィンドウ）では、`desktop_act` が操作後の確認を応答自体に畳み込めます。成功時にオプションの `roiCapture` ——「変化した領域だけ」を切り出した PNG ＋ そこに今ある要素の lease なしプレビュー —— を同梱するので、別途 `desktop_state` ＋ `screenshot` を呼ばずに「クリックの結果」と「次の対象」を確認できます。視覚のみ対象では変化があれば**デフォルトで付与**されます（`returnCapture:"on-change"`）。`returnCapture:"never"` で抑止、`"always"` で常時付与。構造化対象（ブラウザ/CDP・UIA リッチなネイティブ）には付与されないため、それらの応答は不変です（そこは `desktop_state` の方が安価かつ正確）。
+- **🔁 押したら、何が起きたかが返る** — `desktop_act` は操作の後に、何が変わったかを応答に入れて返します。現れた・消えた要素、モーダル、フォーカスの移動、画面の再描画（`observation`）、`narrate:"rich"` なら変わった値と名前まで。クリックの結果を確かめるために、もう一度スクリーンショットを撮る必要がありません。UIA が効かない対象では、変化した領域だけの PNG も同梱できます（`roiCapture`。見える変化があれば既定で付与、`returnCapture:"never"` で抑止、`"always"` で常時）。
+- **🛑 できない操作は「できた」と言わない** — 指定した欄に届かない入力、ダイアログに塞がれた窓、閉じた窓、別の仮想デスクトップの窓には、何も送らずに断り、理由と次の手を返します。`hwnd` で指した操作は、同じ題名の別の窓には届きません。
+- **🌐 深い窓まで読む（v2.1）** — UI Automation を深さ 64・500 要素まで読みます。2.0 では「読めない」と答えていた Chrome・Edge・VS Code のページ、値が欠けていた Explorer と設定、Word の本文が読めて、操作できます（例: Chrome のページは 6 要素・403 ms → 45 要素・101 ms）。
+- **🎯 Set-of-Marks（SoM）ビジュアルフォールバック** — ゲーム・RDP・アクセシビリティの木を持たないアプリなど、UIA が見えない窓でも、`desktop_discover` と `screenshot(detail="text")` が Hybrid Non-CDP パイプラインに切り替えます。Rust 画像前処理 → Windows OCR → クラスタリング → 赤い枠線 + 番号バッジ（`[1]`、`[2]`…）付き PNG を生成し、`clickAt` 座標付きの要素リストを返します。CDP 不要。
+- **⌨️ 裏からの入力が届かない窓にも打つ** — Windows Terminal には毎回利用者に訊いてから貼り付けます（MCP の elicitation に対応したクライアントを stdio で）。Word の本文には、Word が前面でも裏でもキャレット位置に打ちます。
 - **🔐 Key Locker — SSH / sudo のパスワードをターミナルが自動入力** — 認証情報はロッカー自身のセキュアダイアログに一度だけ入力して、この PC 上に暗号化保存（Windows DPAPI）— アシスタントには一切見えません。以後は `key_locker(action='launch_console')` で開いたコンソールで `ssh` / `sudo` を実行するだけで、隠しパスワードプロンプトに自動入力されます（既定では入力毎に確認あり）。詳細は [Key Locker](#key-locker-ターミナル認証情報の自動入力) 参照。
+- **⚡ Rust ネイティブコア** — UIA ブリッジと画像差分を Rust（`napi-rs` + `windows-rs`）のネイティブアドオンで実装。UIA は専用スレッドから COM で直接呼び、PowerShell を起動しません。画像差分は SSE2 SIMD。アドオンが無い環境では、全関数が PowerShell に透過フォールバックします。npm ランチャーは、入れた版に対応する GitHub Release だけを取得し、Windows 用 zip を検証してから展開します。
 - **LLM ネイティブ設計** — 人間の操作を模倣するのではなく、「LLM がいかにコンテキストを消費せず高速に動けるか」を前提に設計。`run_macro` による複数操作の一括実行（API 往復の削減）と、**MPEG P-frame 方式のレイヤー差分** (`diffMode`) を組み合わせることで、無駄な画像転送や推論ループを極限まで削ぎ落とす。
 - **Reactive Perception Graph** — ウィンドウやブラウザタブに `lensId` を登録し、以後の action tool に渡すだけで、操作前の安全 guard と操作後の `post.perception` フィードバックを受け取れます。`screenshot` / `desktop_state` の反復を減らし、別ウィンドウへの誤入力や古い座標クリックを防ぎます。
 - **日本語/CJK 完全対応** — ウィンドウタイトル取得に Win32 `GetWindowTextW` を使用。nut-js の文字化けを回避。IME バイパス入力にも対応。
