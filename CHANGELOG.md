@@ -1,6 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.0] - 2026-10-01 — `desktop_discover` reads web pages and deep windows, and `desktop_act` types into Windows Terminal after asking
+
+2.1 widens what `desktop_discover` can see and what `desktop_act` can do and report. The UI Automation
+read goes by element count instead of depth, so Chrome, Edge and VS Code pages, Word's body, and the
+value labels in Explorer and Settings are read instead of being called blind, and every call reads the
+window afresh. `desktop_act` types into Windows Terminal and into Word's body, asking the user first
+for the terminal; it sees the repaint its action caused, and rich narration reports a changed name and
+follows a window the action renamed. A window on another virtual desktop is no longer brought forward.
+Nothing is removed or renamed: the changes add fields, values and refusal reasons, and correct answers
+that were wrong.
 
 - **`desktop_act` can type into Windows Terminal, after asking.** Windows Terminal ignores
   characters sent to it in the background, so `desktop_act` typing into its terminal input always
