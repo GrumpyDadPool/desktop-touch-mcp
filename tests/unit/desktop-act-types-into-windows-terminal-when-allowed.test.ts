@@ -666,6 +666,72 @@ describe("internal #227 — desktop_act types into Windows Terminal only when th
     expect(ask).not.toHaveBeenCalled();
   });
 
+  // internal #230 — by Unicode property, not a list: these got past the list (gate 2 on #764).
+  it.each([
+    ["the braille blank U+2800, which looks like a space", "rm -rf ./build\u2800old"],
+    ["a musical format control U+1D173", "echo a\u{1d173}b"],
+    ["a shorthand format control U+1BCA0", "echo a\u{1bca0}b"],
+    ["an Egyptian format control U+13430", "echo a\u{13430}b"],
+    ["a lone surrogate", "echo a\ud800b"],
+    ["an Arabic number sign U+0600", "echo \u0600x"],
+  ])("does not ask about text with %s (internal #230)", async (_what, text) => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act(text, ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/control, bidirectional or zero-width/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a keycap", 'git commit -m "step 1\ufe0f\u20e3"'],
+    ["a subdivision flag", "echo \u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"],
+    ["the Scotland flag", "echo \u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}"],
+    // Its prefix (man, boy) is a sequence too: removed whole, not as the prefix plus a stray joiner.
+    ["a family whose first two members form a sequence (man, boy, boy)", "echo \u{1f468}\u200d\u{1f466}\u200d\u{1f466}"],
+    ["a ZWJ sequence through VS16 (heart on fire)", "echo \u2764\ufe0f\u200d\u{1f525}"],
+    ["a ZWJ sequence with a skin tone (person with skin tone at a laptop)", "echo \u{1f9d1}\u{1f3fd}\u200d\u{1f4bb}"],
+    ["a ZWJ sequence ending in VS16 (rainbow flag)", "echo \u{1f3f3}\ufe0f\u200d\u{1f308}"],
+    ["a text-style emoji (VS15)", "echo \u263a\ufe0e"],
+    ["a private-use icon (a Nerd Font glyph)", "echo \ue0b0"],
+  ])("asks about text with %s, which shows as what it is (internal #230)", async (_what, text) => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    await act(text, ctx);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(mockFlash).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["a stray keycap VS16 (no U+20E3)", "echo 1\ufe0fx"],
+    ["tag letters without the black flag", "echo a\u{e0067}\u{e0062}\u{e007f}"],
+    ["an unterminated subdivision flag", "echo \u{1f3f4}\u{e0067}\u{e0062}"],
+    // gate 2 on #766: a tag run after the black flag spells invisible ASCII ("rm -rf").
+    ["tags spelling text after the black flag", "echo \u{1f3f4}\u{e0072}\u{e006d}\u{e0020}\u{e002d}\u{e0072}\u{e0066}\u{e007f}"],
+    ["a zero-width joiner between two non-emoji pictographs", "echo \u00a9\u200d\u00a9"],
+    ["a zero-width joiner from an emoji to a non-emoji pictograph", "echo \u{1f9d1}\u200d\u00a9"],
+    // PR codex on #766: regional indicators and lone skin tones are Emoji_Presentation, not ZWJ elements.
+    // PR codex on #766 (round 4): two emoji that Unicode does not join (cat, dog) still carry the joiner.
+    ["a zero-width joiner between two emoji that form no sequence", "echo \u{1f431}\u200d\u{1f436}"],
+    ["a recognized family with a joiner left over at the end", "echo \u{1f468}\u200d\u{1f469}\u200d\u{1f467}\u200d"],
+    ["a recognized couple followed by a skin tone, which is no listed sequence", "echo \u{1f468}\u200d\u2764\ufe0f\u200d\u{1f468}\u{1f3fb}"],
+    ["a recognized sequence followed by a variation selector (man technologist + VS16)", "echo \u{1f468}\u200d\u{1f4bb}\ufe0f"],
+    ["a zero-width joiner between two regional indicators", "echo \u{1f1e6}\u200d\u{1f1e7}"],
+    ["a zero-width joiner between two lone skin tones", "echo \u{1f3fb}\u200d\u{1f3fb}"],
+    ["a zero-width joiner from an emoji to a regional indicator", "echo \u{1f9d1}\u200d\u{1f1e6}"],
+    ["a zero-width joiner from a regional indicator to an emoji", "echo \u{1f1e6}\u200d\u{1f9d1}"],
+    ["VS15 after an emoji with no text style (grinning face)", "echo \u{1f600}\ufe0e"],
+    // gate 2 round 3 on #766: each side of the skin-tone rule on its own, and VS16 after a non-base.
+    ["a skin tone after a letter, then a zero-width joiner", "echo a\u{1f3fb}\u200d\u{1f600}"],
+    ["a zero-width joiner after a lone skin tone", "echo \u{1f3fb}\u200d\u{1f600}"],
+    ["a zero-width joiner before a lone skin tone", "echo \u{1f44d}\u200d\u{1f3fb}"],
+    ["VS16 after an emoji with no text style (grinning face)", "echo \u{1f600}\ufe0f"],
+    ["the musical null notehead U+1D159, which draws as blank", "echo a\u{1d159}b"],
+    ["a noncharacter U+FFFE", "echo a\ufffeb"],
+  ])("does not ask about %s, which shows as nothing (internal #230)", async (_what, text) => {
+    const { ctx, ask } = asking({ action: "accept", content: {} });
+    const err = await act(text, ctx).catch((e) => e);
+    expect(err?.callerDetail).toMatch(/control, bidirectional or zero-width/);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
   it("does not ask about a variation selector that follows no emoji (file\\ufe0f looks like file; PR codex)", async () => {
     const { ctx, ask } = asking({ action: "accept", content: {} });
     const err = await act("cat file\ufe0f", ctx).catch((e) => e);
