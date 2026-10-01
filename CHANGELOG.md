@@ -4,14 +4,12 @@
 
 The main change: `desktop_discover`'s UI Automation read used to stop at depth 4, and now goes to
 depth 64 and stops at 500 elements. Browsers, Electron apps, Explorer and Settings keep their controls
-below depth 4, so they were reported blind or missing values; now they are read, and what is read can
-be acted on (table below). Word's body, which the old walk could not enter at any depth, is read too.
-What UIA still cannot see falls back to OCR and Set-of-Marks as before. Alongside it, `desktop_act`
-types into Word's body, and into Windows Terminal after asking the user. Nothing is removed or
-renamed: the changes add fields, values and refusal reasons (**New**), change what some reads return
-(**Changed**), and correct answers that were wrong (**Fixed**).
+below depth 4, so 2.0 called them blind or left values out; 2.1 reads them, and what it reads can be
+acted on. What UIA still cannot see falls back to OCR and Set-of-Marks as before. What comes back
+after an act is also more accurate, and `desktop_act` now types into Word's body, and into Windows
+Terminal after asking the user. Nothing is removed or renamed.
 
-### What 2.1 reads and writes that 2.0 did not
+### Reads deeper: what 2.1 reads and acts on that 2.0 did not
 
 Read: a default `desktop_discover`, elements read / time. Measured on one Windows 11 machine on
 2026-09-29, the read as in 2.0.0 against the read as in 2.1.0.
@@ -24,10 +22,9 @@ Read: a default `desktop_discover`, elements read / time. Measured on one Window
 | Long pages (Wikipedia, GitHub, NHK) | blind, OCR / 467–512 ms | 53–179 elements / 109–275 ms |
 | Explorer | the item count missing (47) / 180 ms | included (112) / 390 ms |
 | Settings | the About values missing (20) / 76 ms | included (73) / 154 ms |
-| Word | the body not listed | each visible page's body, as a `textbox`; `query` matches its visible text |
-| A window changed by something other than `desktop_act` | the previous read, up to 30 s old | read again on every call |
+| Word | the body not listed | each visible page's body, as a `textbox` |
 
-Write: `desktop_act`.
+Act: `desktop_act`.
 
 | Target | 2.0.0 | 2.1.0 |
 |---|---|---|
@@ -36,8 +33,10 @@ Write: `desktop_act`.
 | Calculator's buttons | refused (`modal_blocking`, blamed on its own title bar) | pressed |
 | WinUI / WPF / web controls with a modeless Find or tool window open | refused | acted on |
 
-Still not reached: a spreadsheet cell's value (UI Automation does not expose it); a read that fills
-the 500-element cap is reported as truncated (an Excel sheet at 100 % zoom, about 517 elements).
+A browser or Electron window lists its page's controls first, ahead of the browser's tabs and
+toolbar, when web content covers at least half the window. A read that fills the 500-element cap is
+reported as `uia_tree_truncated` (an Excel sheet at 100 % zoom is about 517 elements). Without the
+native UIA engine, the PowerShell fallback keeps the old depth.
 
 **The visual fallbacks stay.** A window UI Automation still cannot see (games, RDP sessions, canvas
 apps, apps with no accessibility tree) is read as before: `desktop_discover` runs OCR on it and returns
@@ -46,240 +45,96 @@ UIA read is sparse. The one difference: a window UIA now reads, such as a browse
 sent to OCR automatically. For text UIA does not expose (a spreadsheet cell, a page's body text), use
 `screenshot(detail: "ocr")`.
 
+### What comes back after an act is more accurate
+
+| After an act | 2.0.0 | 2.1.0 |
+|---|---|---|
+| `observation` after a UI Automation press | `no_change` in 83 of 88 successful acts: the repaint came while the press returned, and was missed | the repaint is seen: regions are collected from before the act to 150 ms after it, and 500 px or more inside the window is a change |
+| A window that repaints itself (a console cursor, some WinForms and Java windows) | — | `motion: "indeterminate"`, `selfRepainting: true` when seen repainting twice, 300 ms or more apart, since the last discover or act (`observation.watchedBeforeMs`) |
+| Rich narration, a value shown in a name (a calculator's display, an item count) | one element gone, another appeared | `post.rich.nameDeltas` (`type`, `before`, `after`; up to 3) |
+| Rich narration, a window the act retitled (typing in Notepad, opening a folder in Explorer) | `timeout` | the diff, read by the window's handle |
+| `desktop_discover` after a change made outside `desktop_act` (another program, COM, an Alt-Tab) | the previous read, up to 30 s old | read again on every call (65 ms for Notepad, about 350 ms for an Excel sheet) |
+
+The screen's changed regions do not say which window drew them, so another window repainting over
+the target, or the target's own activation, still counts as a change. Rich narration withholds a diff
+of a window that fills the read cap (`diffDegraded: "tree_truncated"`), never reports a name change
+for list, grid or tree rows (they are reused for other items), and reports a window that closed or
+was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
+
+### Windows Terminal and Word
+
+- **`desktop_act` types into Windows Terminal, after asking.** WT ignores characters sent in the
+  background. Now the server asks the user through the MCP client's question form, every time, and
+  on Accept pastes through the foreground and puts the previous window back. **This needs a client
+  that supports MCP elicitation** (it declares the `elicitation` capability; added in MCP 2025-06-18)
+  connected over stdio. Decline, Esc, no answer within 120 s, or a client that cannot ask types
+  nothing and ends `foreground_not_allowed` with a `detail`; do not type into the terminal another way
+  after a no. The question shows the whole text with the window's title and selected tab (one line,
+  600 characters in all; a trailing newline is Enter) and says where the window is when another has
+  its title; two in the same place are refused. Nothing is typed if the window or tab changed while the user answered, into a tab split
+  into panes, into a terminal that is the window in front, when the tool call was cancelled, or when
+  the terminal's input will not take the keyboard focus (`terminal_focus_failed`; an open find box
+  would otherwise take the text).
+- **Word's body is read, found and typed into.** `desktop_discover` lists each visible page's body as
+  a `textbox`, and a `query` matches the words visible on a page (they are matched, not returned).
+  `desktop_act(type)` posts the characters at Word's caret, in front or behind; the reply says the
+  landing could not be confirmed, AutoCorrect applies, and `setValue` is refused (select, then type).
+  Nothing is typed while a dialog is open over Word or when its document window changed since the
+  read.
+
 ### New
 
-- **`desktop_discover` reads deeper into a window's UI Automation tree.** Its UIA read stopped at
-  depth 4. So Chrome, Edge and VS Code, which expose their page controls at depth 7–12, were
-  reported as `uia_blind_single_pane`, and value labels in Explorer and Settings (depth 5–7) were
-  missing. The read now goes to depth 64 and stops at 500 elements. Across the 17 kinds of app
-  measured (Win32, WinUI, UWP, WinForms, WPF, Electron, browsers, Explorer, consoles), the most any
-  returned was 128 elements, in at most about 0.4 s. A read that stops at its 500-element cap is
-  reported with `uia_tree_truncated`. When the native UIA engine is not available, the PowerShell
-  fallback keeps the old depth.
-
-- **`desktop_discover` reaches Word's document body.** Word answers UI Automation's request for all
-  children of its document area with one small pane, and the walk used that request, so it never
-  listed a page or the body. A read of Word now lists each visible page and its body, a `textbox`
-  that can be clicked. Pages scrolled past are left out, as other offscreen elements are. Other
-  applications read as before.
-
-- **`desktop_discover`'s `query` finds a Word page by the words on it.** A page's body is listed
-  under its name ("ページ 1 のコンテンツ"), so a query for words in the document matched nothing.
-  Now the text visible on each page shown is matched as well. The text is only matched: it is not
-  in the reply, and no other tool returns it. Text scrolled out of view is still not matched.
-
-- **`desktop_act` types into Word's body.** The body offers UI Automation no value to write, so
-  `desktop_act(type)` had no route into it and was refused. It is now offered the keyboard, and the
-  characters are posted to Word's document window. They land at Word's caret whether Word is in front
-  or behind, and whatever holds Word's focus. Before, the ribbon's font-size box took them. The caret
-  may be on another page than the body named. The reply says the landing could not be confirmed.
-  Word's AutoCorrect applies to the text as it does to typing. `setValue` is refused, because
-  keystrokes insert rather than replace: select the text first, then `type`. In Word, ctrl+a
-  selects the whole document. If a dialog is open over Word, or Word's document window has changed
-  since the read, nothing is typed. Other text fields with no value are refused as before.
-
-- **`desktop_act` can type into Windows Terminal, after asking.** Windows Terminal ignores
-  characters sent to it in the background, so `desktop_act` typing into its terminal input always
-  ended `executor_failed`. Now the server asks the user through the MCP client's question form
-  (what will be typed, and into which window), every time. **This needs a client that supports MCP
-  elicitation** (it declares the `elicitation` capability; added in MCP 2025-06-18) and the stdio
-  transport; with any other client nothing is typed. On Accept it pastes through the foreground, as `terminal` send's `foreground_flash` does,
-  and puts the previous window back. Decline, Esc, no answer within 120 s, or a client that cannot
-  show the question (`claude -p`, or the HTTP transport) type nothing; the act ends with the new
-  reason `foreground_not_allowed` and a `detail` that says why. Its advice does not send the caller
-  around the user's no, as `executor_failed`'s foreground advice would. The terminal is checked
-  again after the answer, and a question whose tool call was cancelled does not type. There is no
-  way to allow it without the question. The question
-  shows the whole text with the window's title and selected tab, so it must be one line and all of
-  it at most 600 characters; one trailing newline is sent as Enter. When another window has the
-  same title, the question says where the terminal is on screen; two in the same place are refused. If the terminal's window or active tab changed while the user was answering,
-  nothing is typed. A tab split into panes is refused. A terminal that is the window in front is refused: when the client runs in one of
-  its tabs, the paste would arrive as the user's next message. Before pasting, the server puts the
-  terminal's keyboard focus on its input, so an open find box does not take the text; when it
-  cannot, nothing is typed (`terminal_focus_failed` in the detail).
-
-- **Rich narration says when an element's name changed.** Some apps show a value in an element's
-  name rather than its value: a calculator's display, a status bar's item count. When such a name
-  changed, `narrate: "rich"` reported one element disappearing and another appearing, and
-  `valueDeltas` stayed empty. It now reports `post.rich.nameDeltas` (`type`, `before`, `after`,
-  up to 3). The elements before and after the action are matched by UI Automation's RuntimeId, and
-  an element the app rebuilt is matched by its position in the tree when exactly one element sits
-  there before and after. The read also goes deeper, to the same element-count cap as
-  `desktop_discover`, because such values sit below the old depth 3. A window whose read fills that
-  cap is too large to diff reliably, and the diff is withheld with `diffDegraded: "tree_truncated"`.
-  Rebuilt elements are matched by position only when they are the only change under their parent,
-  so a list refilled with other items is still reported as items appearing and disappearing. A
-  name change is reported only when the old name is gone and the new one is new, and never for the
-  rows of a list, grid or tree or what is inside them: those rows are reused for other files when
-  a list is refreshed or moves to another folder. A row renamed for real is reported as one item
-  disappearing and one appearing, and a row that appears or disappears is reported without the
-  cells inside it. A control replaced by one of another type is reported as one disappearing and
-  one appearing, even under the same name.
-
-- **`workspace_launch` returns the window it found: `windowTitle`, `hwnd` and `pid`.** Its
-  description promised these, but the reply carried only `foundWindow` (the title) and
-  `region`. `foundWindow` stays, with the same value as `windowTitle`. The description now
-  names the parameter the tool takes (`waitMs`, default 2000) instead of `timeoutMs` and
-  `detach`, which it never had. A new window now wins over an already-open window that only
-  changed its title during the wait (which could be an unrelated app); that one is reported only
-  when no new window appeared by the end of `waitMs`. An app that only retitles its existing
-  window (such as a single-instance browser) therefore answers after the whole `waitMs`.
-
-- **`desktop_discover` says why a `query` found nothing.** A `query` that matched none of the
-  controls read used to return an empty list and nothing else. The list was the same when the text
-  was scrolled out of view, when it was text UI Automation does not expose (a spreadsheet cell's
-  number, a Word document's body, a Java window's contents), and when the read had stopped at its element cap. The reply now carries the
-  constraint `query: "no_match"` (and `entityZeroReason: "query_no_match"` when the list is empty,
-  unless a lane failure explains it better). The description says what to do instead: scroll the
-  text into view and call again, or read visible text with `screenshot(detail: "ocr")`. The next
-  call reads the window again rather than serving the list from before the scroll. The description
-  also says what `uia_tree_truncated` means.
-
-- **`desktop_discover` says when the window `target.hwnd` names has closed.** A call with the handle
-  of a window that is gone, such as a dialog named by an earlier refusal, used to return
-  `entities: []` with no warning, or blamed the UIA lane (`uia_provider_failed`, with
-  `entityZeroReason: all_providers_failed`). It now returns the warning `target_window_gone`, sets
-  `constraints.window` to the same value, and when there are no entities sets
-  `constraints.entityZeroReason` to it too. To recover, discover the window the closed one belonged
-  to, or call without `target.hwnd`. Nothing is read from the closed window, so a remembered read
-  of it is not returned with new leases. The warning appears only when Windows answers that the
-  handle is not a window. A window that is only hidden, or a handle of zero, does not get it.
-
-- **`desktop_discover` says when `target.hwnd` and `target.windowTitle` name different windows.**
-  With both, the handle's window was read and the title was dropped without a word, even when it
-  named another open window. The handle still wins; the reply now carries the warning
-  `target_title_mismatch` when that window's title does not contain the one sent.
-
-- **`desktop_discover` says when the window it was asked about is excluded.** A window this
-  server keeps out of every tool, such as the key locker's own, used to answer
-  `ingress_fetch_error`, whose advice is to retry. It now answers the warning `window_excluded`,
-  with `constraints.window` and `constraints.entityZeroReason` set to the same value. No lane reads
-  the window, and calling again returns the same answer while it stays excluded. A call
-  with no target, while such a window is in front, says the same.
-
-- **A paste made while the IME was on says it may not have landed.** With an IME composition
-  pending, `keyboard(action:'type', use_clipboard:true)` and `terminal(action:'send')` pasted into
-  the IME, inserted nothing, and answered `ok:true`. Whether a composition is pending cannot be read
-  from outside every application (Word's body gives no sign of it), so `hints.clipboard` now carries
-  `imeOpen: true` and a note when the foreground window's IME was on at the paste: commit or cancel
-  any pending composition, then check the text.
+- `workspace_launch` returns the window it found as `windowTitle`, `hwnd` and `pid` (`foundWindow`
+  stays). Its description names the parameter it takes, `waitMs` (default 2000), not `timeoutMs` or
+  `detach`. It now prefers a new window over an existing one that only retitled, so a single-instance
+  app that only retitles answers after the whole `waitMs`.
+- `desktop_discover` says why a `query` found nothing: `constraints.query: "no_match"`, and
+  `entityZeroReason: "query_no_match"` when the list is empty (scroll the text into view, or use
+  `screenshot(detail: "ocr")`).
+- New `desktop_discover` warnings, the first and last also set as `constraints.window` (and as
+  `entityZeroReason` when nothing is returned):
+  - `target_window_gone`: Windows says the `target.hwnd` handle is no longer a window (not for a
+    hidden window or hwnd 0).
+  - `target_title_mismatch`: `target.hwnd` and `target.windowTitle` name different windows; the
+    handle wins.
+  - `window_excluded`: a window this server keeps out of every tool, such as the key locker's, also
+    for a call with no target while one is in front. It replaces `ingress_fetch_error`, whose advice
+    was to retry; retrying gives the same answer.
+- `keyboard(action:'type', use_clipboard:true)` and `terminal(action:'send')` pasting while the
+  foreground window's IME was on carry `hints.clipboard.imeOpen: true`: the text may have gone into a
+  pending composition (it answered `ok:true` with nothing inserted).
 
 ### Changed
 
-- **In a window holding a web page, `desktop_discover` lists the page first.** Browsers and
-  Electron apps now expose their pages to the deeper UIA read. In read order, though, the browser's
-  own tabs, address bar and toolbar came first and filled the first entities returned (20 by default). When the read
-  finds a page, the page's controls are listed first and everything else after them. A page counts
-  only when web content covers at least half the window (a page and a docked DevTools count
-  together, and where they overlap it counts once), so a small web pane inside a native app does
-  not reorder that app. OCR is not run for a page that UIA reads. If a page's text is not in the
-  reply, use `screenshot` with `detail: "ocr"`.
-
-- **`desktop_discover` reads the window on every call.** It used to answer from its last read for
-  up to 30 seconds unless a window appeared or disappeared, and missed every change made inside a
-  window by something other than `desktop_act`: an Excel sheet switched or zoomed over COM, a field
-  changed by another program, a control destroyed, a dialog opened or closed. A call with no
-  target kept describing the previous foreground window after an Alt-Tab. `freshness.from` is now
-  `read`, or `unavailable` when the read failed. A failed read no longer returns the previous read
-  as `staleCache`. A call takes as long as a read: 65 ms for Notepad, about 350 ms for an Excel
-  sheet, measured.
-
-- **`desktop_discover` tells a terminal by its window, not its title.** A browser page titled
-  "Bash scripting" (or any title naming a shell) was read as a terminal: a terminal lane ran on it,
-  the page's own controls fell to the bottom of the list, and OCR was skipped. Most real terminals,
-  meanwhile, were not read as one unless their title named a shell. A window is now a terminal when
-  it is a console window (cmd, PowerShell, WSL) or a Windows Terminal window, whatever its title.
-  Git Bash (mintty) and ConEmu windows are now read as ordinary windows, including those titled
-  "Git Bash" or "mintty" that were read as terminals before. VS Code's integrated terminal is read
-  as an ordinary window, as before. A Windows Terminal window's terminal input entity can be typed
-  into with `desktop_act` after the user agrees (see above).
-
-- **A window on another virtual desktop is not brought forward.** A title search can pick a window
-  on another virtual desktop: it can come ahead of a same-titled window on the screen. `keyboard`
-  brought it forward, which switched the user to that desktop, and typed nothing. Now, when a tool
-  is about to bring such a window forward, it ends `WindowOnOtherDesktop` before anything is focused
-  or sent. This applies to `keyboard` (type, press, sequence; `foreground_flash` unless the window
-  takes posted characters), `terminal` send (focus and `foreground_flash`), and the mouse tools
-  when they bring the window forward for homing (`mouse_move`, `mouse_click`, `mouse_drag`,
-  `scroll`). `context.sameTitleOnScreen` says whether a window with that title is on this desktop,
-  so it can be named exactly. Whether a window is on another desktop is asked of Windows' virtual
-  desktop manager; a window its app has hidden is not refused. Which window a title picks is
-  unchanged, and routes that do not take the foreground (background input, screenshots) still reach
-  such a window. The mouse tools now bring forward the window named by `hwnd`, not the first window
-  with its title. `focus_window` still brings a window on another desktop forward.
+- **A window on another virtual desktop is not brought forward.** Which window a title picks is
+  unchanged, so such a window can still be picked, and then `keyboard`, `terminal` send and the
+  mouse tools (when homing brings the window forward) end `WindowOnOtherDesktop` before anything is
+  focused or sent; `context.sameTitleOnScreen` says whether a window with that title is on this
+  desktop. Background input and screenshots still reach such a window, and `focus_window` still
+  brings it forward. A window its app has hidden is not refused. The mouse tools now bring forward
+  the window named by `hwnd`, not the first with its title.
+- **A terminal is told by its window, not its title.** Console windows (cmd, PowerShell, WSL) and
+  Windows Terminal are terminals whatever their title; a browser page titled "Bash scripting" is not.
+  Git Bash (mintty) and ConEmu are now read as ordinary windows.
+- **`desktop_discover` no longer answers from a cache.** `freshness.from` is `read`, or `unavailable`
+  when the read failed; a failed read no longer returns the previous read as `staleCache`.
 
 ### Fixed
 
-- **`desktop_act` sees the repaint its action caused.** Its `observation` came from the screen's
-  changed regions, read after the action had returned. A UI Automation press takes about 2 s, and
-  the window repainted as it returned, so the read missed it: 83 of 88 successful acts measured
-  said `no_change`. The regions are now collected from before the action, and for up to 150 ms
-  after it; a region of at least 500 px inside the window is a change (a blinking caret is not).
-  The window is also watched from `desktop_discover` (or the previous act) to the act, and
-  `observation.watchedBeforeMs` says for how long. A window seen repainting itself in that time —
-  twice, 300 ms or more apart (a console's cursor, some WinForms and Java windows) — is reported as
-  `motion: "indeterminate"` with `selfRepainting: true`, because its own repaints cannot be told
-  from the action's. The screen's regions do not say which window drew them, so another window
-  repainting over the target, or the target's own activation when the act brings it forward, still
-  counts as a change.
-
-- **Rich narration keeps the window an action renamed.** The diff read the window again by its
-  title after the action. An action that changed the title — typing into Notepad makes it read
-  `*… - メモ帳`, and opening a folder renames Explorer after it — left that read finding nothing,
-  and the diff came back `timeout`. Both reads now name the window by its handle, so the diff is
-  shown. This also applies to calls that give only a window title: the second read goes to the
-  window the first one read. A window that closed, was hidden, or was replaced after the action is
-  reported as `window_closed`, `target_changed` (one other window has its title) or
-  `ambiguous_title` (several do), now also for those title-only calls.
-
-- **A window that says it is not modal no longer blocks an act.** UI Automation lists a window's
-  owned windows in its tree, and `desktop_act` refused an act when any of them was in the last read,
-  unless the OS could say the element's own window takes input. For controls without a window of
-  their own (WinUI, XAML, WPF, web content) it could not, so a modeless window such as a
-  Find/Replace box or a tool window refused acts on those controls, and its opening was reported as
-  `modal_appeared`. The read now records each window's own `IsModal`. A window that answers
-  `false` does not block, and its appearing is reported as `entity_appeared`. A window that answers
-  `true`, or does not answer (a title bar, an older native engine), is treated as before.
-
-- **`desktop_act` no longer refuses a button because of its own window's title bar, and says when
-  the dialog it would have named has closed.** A window that `desktop_discover` listed is now
-  checked with Windows at the time of the act before it counts as a blocking modal. A window inside
-  the top-level window the element was read from is not counted. One example is Calculator's own
-  title bar, which refused every button with `modal_blocking`. A listed window that has since
-  closed now gets `lease_generation_mismatch` with a `detail` that names it, instead of
-  `modal_blocking` naming a window that is not there. Re-call `desktop_discover`. An owned dialog, a
-  MessageBox, a child window inside another top-level window, and a window Windows cannot be asked
-  about are refused as before. A modal that an app draws as a child window of its own main window
-  (an MDI modal child) is no longer refused. Windows does not disable the main window for it, so no
-  check sees it.
-
-- **`desktop_act` says why it refuses a `type` that nothing here can carry.** An element no route
-  here can type into got `executor_failed` with no `detail`, and the advice
-  said UIA setValue and background WM_CHAR had been tried. Neither had run. `detail` now says that
-  nothing was tried, why each route could not carry the text, and what to do instead. For `type`,
-  place the caret yourself and type with `keyboard`. For `setValue`, select the contents first.
-  The advice defers to `detail` in that case.
-
-- **The launcher says why a first install failed under a long cache path.** With
-  long paths disabled in Windows, a cache directory (`DESKTOP_TOUCH_MCP_HOME`, or
-  `%USERPROFILE%\.desktop-touch-mcp` by default) of 126 characters or more put
-  some of 2.0.0's files past Windows' 260-character limit. Windows PowerShell 5.1's
-  extractor then removed what it had written and reported success, and the
-  launcher printed only `stderr maxBuffer length exceeded`.
-
-  The launcher now checks that every file in the release arrived. When some are
-  missing, startup stops with how many arrived, the longest path, and how many
-  characters shorter the cache directory must be, followed by the extractor's
-  own last message.
-
-- **`desktop_discover` addressed by `hwnd` reports the window's title in `target.title`.** It
-  reported the hwnd itself. With both `hwnd` and `windowTitle`, the title is the hwnd's window,
-  the one that was read. A window missing from the reply's `windows` list still reports the hwnd.
-
-- **The `keyboard` advice points at a `desktop_discover` call the tool accepts.** With no
-  `windowTitle`, its example used `target:{focused:true}`, a key `desktop_discover` does not
-  take, which it silently dropped. The example now uses the caller's `hwnd` (ahead of
-  `windowTitle`, as `keyboard` itself targets), or no target (the foreground window).
+- A modeless window (one whose UI Automation `IsModal` is false, such as Find/Replace) no longer
+  blocks acts or reports `modal_appeared`; it reports `entity_appeared`. A window that answers true,
+  or does not answer (a title bar, an older native engine), blocks as before.
+- A window listed as blocking is checked with Windows at act time: Calculator's own title bar no
+  longer refuses its buttons, and a dialog that has since closed gives `lease_generation_mismatch`
+  naming it instead of `modal_blocking`. An MDI modal child is no longer refused.
+- A `type` that no route here can carry says so in `detail`: nothing was tried, why each route could
+  not, and what to do instead. The old advice claimed setValue and WM_CHAR had been tried.
+- The launcher says why a first install failed under a long cache path (`DESKTOP_TOUCH_MCP_HOME` or
+  `%USERPROFILE%\.desktop-touch-mcp`, 126 characters or more with long paths off): how many files
+  arrived, the longest path, and how much shorter the path must be.
+- `desktop_discover` addressed by `hwnd` reports the window's title in `target.title`, not the hwnd
+  (a window missing from the reply's `windows` list still reports the hwnd).
+- The `keyboard` advice's `desktop_discover` example uses a target the tool accepts.
 
 ## [2.0.0] - 2026-09-24 — An action that cannot be done is refused, not reported as done
 
