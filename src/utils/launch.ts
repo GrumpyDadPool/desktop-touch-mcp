@@ -49,7 +49,7 @@ export function validateLaunchCommand(command: string, args: string[]): void {
   if (BLOCKED_EXECUTABLES.has(basename) || BLOCKED_EXECUTABLES.has(basenameNoExt)) {
     throw new Error(
       `Blocked: "${basename}" is a shell interpreter and cannot be launched for security reasons. ` +
-      `To allow it, add it to desktop-touch-allowlist.json (see README for details).`
+      `To allow it, add it to desktop-touch-allowlist.json (see docs/guide.md in the desktop-touch-mcp repository: https://github.com/Harusame64/desktop-touch-mcp/blob/main/docs/guide.md).`
     );
   }
   for (const arg of args) {

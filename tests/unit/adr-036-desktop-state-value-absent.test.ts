@@ -528,8 +528,8 @@ describe("ADR-036: desktop_state names the road that left the value out", () => 
    * WHAT IT COVERS, SAID EXACTLY, because the previous version of this docstring claimed more than
    * it held and that is how the last hole survived: the two v2 tool descriptions as `tools/list`
    * serves them, the whole `new McpServer(...)` call that carries the instructions, and the ONE
-   * section of each README that the paragraph is in. Outside that: another tool's description (the
-   * V1 tools are registered elsewhere and are not read here), another section of either README, and
+   * section of each guide (`docs/guide*.md`, the README's details since 2.1.0) that the paragraph is in. Outside that: another tool's description (the
+   * V1 tools are registered elsewhere and are not read here), another section of either guide or README, and
    * any prose that is not markdown. `docs/anti-fukuwarai-3x-supplement.md` §5.2 makes a read-back
    * claim and is annotated rather than pinned — it is a maintainers' document, not a shipped string.
    * The inventory assertion at the end is what notices a NEW document; nothing here notices a new
