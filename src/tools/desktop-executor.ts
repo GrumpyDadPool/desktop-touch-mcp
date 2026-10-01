@@ -187,6 +187,15 @@ export interface ExecutorDeps {
   ): Promise<KeyboardReceipt>;
   /** Post `text` to exactly `receipt.receiverHwnd`, the handle that was judged, without asking the focus again. */
   keyboardPost?(receipt: KeyboardReceipt, text: string): Promise<void>;
+  /**
+   * The visible text of the window's Word page bodies, joined; `undefined` when it cannot be read.
+   * Read before and after a post into a keyboard host, because a post that succeeds is not text that
+   * landed: Word opened seconds before can keep the first ten characters and drop the rest (win2,
+   * 2.1.0 dogfood). Optional: a backend without it keeps the unconfirmed landing it had.
+   */
+  readHostText?(rootHwnd: bigint): Promise<string | undefined>;
+  /** Wait until `hwnd`'s thread has handled what was posted to it (WM_NULL with a budget); `null` if it cannot be asked. */
+  hostAnswers?(hwnd: bigint, timeoutMs: number): Promise<boolean | null>;
   /** Mouse: click at absolute screen coordinates. */
   mouseClick(x: number, y: number): Promise<void>;
   /**
@@ -2036,7 +2045,29 @@ async function keyboardRung(
         `reference window from ${verdict.referenceFrom}`,
     );
   }
+  // A post into a keyboard host (Word's body) is read back: Word opened seconds before kept the first
+  // ten characters of a type and dropped the rest, and every later post, while this answered ok:true
+  // (win2, 2.1.0 dogfood; the cause inside Word is not known). The page text is read before and after,
+  // and the typed text must appear once more than it did. Compared by letters and digits only, so
+  // AutoCorrect's capitals and symbols do not fail a type that landed.
+  const hostRoot = hostHwnd !== undefined && d.readHostText !== undefined ? receipt.receiverRootHwnd ?? receipt.windowHwnd : undefined;
+  const needle = hostRoot !== undefined ? landingNeedle(text) : "";
+  const textBefore = hostRoot !== undefined && needle !== "" ? await d.readHostText!(hostRoot) : undefined;
   await d.keyboardPost(receipt, text);
+  if (hostRoot !== undefined && textBefore !== undefined) {
+    const landed = await hostTextLanded(d, hostRoot, receipt.receiverHwnd ?? receipt.windowHwnd, needle, textBefore);
+    if (landed === false) {
+      probeRefusal("keyboard", "value_not_applied", aimHwnd, entity, { addressedWindowBy, check: "host_readback" });
+      throw new ValueNotAppliedError(
+        `The text posted to "${entity.label ?? entity.entityId}" was not found in Word's page text read back afterwards`,
+        undefined,
+        `The characters were sent to "${quotedLabel(entity)}", but the page text read back afterwards does not contain ` +
+        `the text, so this act does not report it typed. Part of it may have been typed. Read the document before typing ` +
+        `again. A Word window opened only seconds earlier can stop taking typed characters; wait a few seconds, re-run ` +
+        `desktop_discover, and try once more.`,
+      );
+    }
+  }
   probeRoute("keyboard", aimHwnd, entity, {
     why,
     verdict: verdict.confirmed ? "posted" : `unconfirmed:${verdict.why}`,
@@ -2047,6 +2078,39 @@ async function keyboardRung(
   return verdict.confirmed
     ? "keyboard"
     : { kind: "keyboard", landing: { confirmed: false, why: verdict.why, referenceFrom: verdict.referenceFrom } };
+}
+
+/** Letters and digits only, lower case: what AutoCorrect leaves of typed text. */
+export function landingNeedle(text: string): string {
+  return text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  let n = 0;
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) n++;
+  return n;
+}
+
+/**
+ * Whether `needle` appears in the host's page text once more than it did before the post: `true`,
+ * `false` (read, and not there), or `undefined` (the text could not be read afterwards, so the old
+ * unconfirmed landing stands). Waits for the host's thread to handle the post, then reads up to three
+ * times, 150 ms apart (win2 read the body back in 85–250 ms).
+ */
+async function hostTextLanded(
+  d: ExecutorDeps, root: bigint, receiver: bigint, needle: string, before: string,
+): Promise<boolean | undefined> {
+  await d.hostAnswers?.(receiver, 2000);
+  const was = countOccurrences(landingNeedle(before), needle);
+  let readOnce = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 150));
+    const after = await d.readHostText!(root);
+    if (after === undefined) continue;
+    readOnce = true;
+    if (countOccurrences(landingNeedle(after), needle) > was) return true;
+  }
+  return readOnce ? false : undefined;
 }
 
 function centerInside(
@@ -3382,6 +3446,24 @@ function getSharedRealDeps(): ExecutorDeps {
       const { readOwnerChain } = await import("../engine/receiver-facts.js");
       receipt.ownerChain = readOwnerChain(receipt.receiverRootHwnd ?? null);
       return receipt;
+    },
+
+    async readHostText(rootHwnd) {
+      try {
+        const { getUiElements } = await import("../engine/uia-bridge.js");
+        // The same deep read discover takes, scoped to the window and with Word's page text (#217);
+        // such a read is never answered from the cache.
+        const r = await getUiElements("", 64, 500, 8000, { pinnedHwnd: rootHwnd, readBodyText: true });
+        const texts = r.elements.map((e) => e.visibleText).filter((t): t is string => typeof t === "string");
+        return texts.length > 0 ? texts.join("\n") : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
+    async hostAnswers(hwnd, timeoutMs) {
+      const { windowAnswers } = await import("../engine/win32.js");
+      return windowAnswers(hwnd, timeoutMs);
     },
 
     async keyboardPost(receipt, text) {

@@ -77,10 +77,12 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
   would otherwise take the text).
 - **Word's body is read, found and typed into.** `desktop_discover` lists each visible page's body as
   a `textbox`, and a `query` matches the words visible on a page (they are matched, not returned).
-  `desktop_act(type)` posts the characters at Word's caret, in front or behind; the reply says the
-  landing could not be confirmed, AutoCorrect applies, and `setValue` is refused (select, then type).
-  Nothing is typed while a dialog is open over Word or when its document window changed since the
-  read.
+  `desktop_act(type)` posts the characters at Word's caret, in front or behind, and reads the page
+  text back: when the typed text is not there (Word opened seconds before can drop all but the first
+  few characters), the act fails `value_not_applied` and says part of it may have been typed. The
+  reply says where on the page it landed could not be confirmed, AutoCorrect applies, and `setValue`
+  is refused (select, then type). Nothing is typed while a dialog is open over Word or when its
+  document window changed since the read.
 
 ### New
 

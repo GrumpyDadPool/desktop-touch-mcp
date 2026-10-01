@@ -252,3 +252,55 @@ describe("which fields are this route's (one predicate for every place that asks
     expect(keyboardHostOf(f({ controlType: "Document" }))).toBeUndefined();
   });
 });
+
+/**
+ * 2.1.0 dogfood (win2): Word opened seconds before kept the first ten characters of a type and dropped
+ * the rest, and every later post, while the act answered ok:true. A post into the host is read back.
+ */
+describe("a type into Word's body is read back", () => {
+  async function typeReadBack(text: string, reads: Array<string | undefined>) {
+    const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+    const receipt = { windowHwnd: FRAME, receiverHwnd: WWG, receiverRootHwnd: FRAME, receiverAncestors: [FRAME], ancestorsComplete: true, originRootHwnd: FRAME, aimRootHwnd: FRAME, lookupRootHwnd: FRAME, ownerChain: [] };
+    const queue = [...reads];
+    const readHostText = vi.fn(async () => queue.length > 1 ? queue.shift() : queue[0]);
+    const hostAnswers = vi.fn(async () => true);
+    const keyboardPost = vi.fn(async () => {});
+    const exec = createDesktopExecutor({ hwnd: String(FRAME) }, {
+      uiaClick: vi.fn(), uiaSetValue: vi.fn(), cdpClick: vi.fn(), cdpFill: vi.fn(), terminalSend: vi.fn(),
+      keyboardTypeBg: vi.fn(), mouseClick: vi.fn(), keyboardResolve: vi.fn(async () => receipt), keyboardPost,
+      readHostText, hostAnswers,
+      windowTakesInput: () => true,
+    });
+    const out = await exec(bodyOf({ hostWindowHandle: String(WWG), hostWindowClass: "_WwG" }), "type", text).then((v) => v, (e: unknown) => e);
+    return { out, readHostText, hostAnswers, keyboardPost };
+  }
+
+  it("and succeeds when the text appears, AutoCorrect's capital and all", async () => {
+    const { out, hostAnswers } = await typeReadBack(" abc123 xyz789 END", ["Hello.", "Hello. Abc123 xyz789 END"]);
+    expect(out).toMatchObject({ kind: "keyboard", landing: { confirmed: false } });
+    expect(hostAnswers).toHaveBeenCalledWith(WWG, 2000);
+  });
+
+  it("and refuses as not applied when only the first characters arrived (win2: 10 of 12)", async () => {
+    const { out, readHostText } = await typeReadBack(" N4TYPED-210", ["Hello.", "Hello. N4TYPED-2"]);
+    expect((out as Error).name).toBe("ValueNotAppliedError");
+    expect((out as { callerDetail: string }).callerDetail).toMatch(/does not contain the text.*Part of it may have been typed\. Read the document before typing again/);
+    expect(readHostText).toHaveBeenCalledTimes(4); // before, and three reads after
+  });
+
+  it("and refuses when nothing arrived, even though the same text was already on the page", async () => {
+    const { out } = await typeReadBack("abc", ["abc", "abc"]);
+    expect((out as Error).name).toBe("ValueNotAppliedError");
+  });
+
+  it("and keeps the unconfirmed landing when the page text cannot be read afterwards", async () => {
+    const { out } = await typeReadBack("abc", ["Hello.", undefined]);
+    expect(out).toMatchObject({ kind: "keyboard", landing: { confirmed: false } });
+  });
+
+  it("and is not attempted for text with no letter or digit", async () => {
+    const { out, readHostText } = await typeReadBack("  ", ["x"]);
+    expect(out).toMatchObject({ kind: "keyboard" });
+    expect(readHostText).not.toHaveBeenCalled();
+  });
+});
