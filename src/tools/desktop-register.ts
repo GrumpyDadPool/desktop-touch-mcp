@@ -1428,8 +1428,8 @@ export const desktopActRawHandler = async (
   if (!result.ok && result.reason === "value_not_applied") {
     const failure = toFailureEnvelope(
       Err(new ValueNotAppliedRefusalError(
-        "ValueNotApplied: UI Automation accepted the value, but the control's value read back unchanged for a moment after the write (native UI Automation client). " +
-        "if_unexpected.detail names the control"
+        "ValueNotApplied: the write was accepted, but what it should have changed read back unchanged (a control's value through the native UI Automation client, or Word's page text). " +
+        "if_unexpected.detail names the control and what was read"
       )),
       { optIn: false, detail: result.detail },
     );
@@ -2031,7 +2031,7 @@ export function registerDesktopTools(server: McpServer): void {
       "  foreground_not_allowed → typing into Windows Terminal needs the foreground, and it was not allowed (declined, dismissed, unanswered, cannot ask; the terminal in front, split, not a terminal tab, on another desktop, changed or unreadable; text or title that cannot be shown in full; or the paste failed); if_unexpected.detail says which, and whether anything was typed. Do NOT type into it another way after a no;",
       "  aim_blocked_by_excluded_window → a window this server may not act through is over the point, so nothing was done; the window you named is NOT the excluded one and is still actionable. Use V1 click_element, which does not use coordinates, or retry once the point is clear — do NOT retry by coordinate, and note that nothing in the response describes the window in the way;",
       "  action_not_offered → the target does not offer this action and NOTHING WAS DONE — no road was taken, so it is not a failed executor. Ask for what you mean: action='click' / 'invoke' presses it; the entity's affordances say which actions it offers. No provider advertises 'select', so a select on any target is this refusal. A type or setValue on a control UI Automation reports as a button, check box, radio button, hyperlink or menu item is this refusal too: none of them takes text, and nothing was typed;",
-      "  value_not_applied → a type or setValue went through the native UI Automation client to a control that is not a text field (not Edit or Document), the control said yes, and its value read back unchanged for a moment after the write; nothing else was tried. Do not retry it or type into the same control another way (on a WinForms NumericUpDown a keystroke landed at its caret); re-call desktop_discover and check the field before writing again;",
+      "  value_not_applied → the write was accepted and nothing read back changed: a type or setValue through the native UI Automation client to a control that is not a text field (not Edit or Document) whose value read back unchanged for a moment after the write (nothing else was tried), or a type into Word's body after which the visible page text read back unchanged (it may have landed out of view). Do not retry it or type into the same control another way (on a WinForms NumericUpDown a keystroke landed at its caret); look at the field or document, or re-call desktop_discover, before writing again;",
       "  window_excluded → this window is excluded from every tool surface of this server (the key locker's own windows are); nothing was clicked and no route here can click it. Act on another window;",
       "  executor_failed → fall back to V1 tools (click_element / mouse_click / browser_click);",
       "  executor_failed on terminal textbox (action=type) → use V1 terminal(action='send') instead — but never after foreground_not_allowed: terminal send pastes into Windows Terminal without asking;",

@@ -254,53 +254,58 @@ describe("which fields are this route's (one predicate for every place that asks
 });
 
 /**
- * 2.1.0 dogfood (win2): Word opened seconds before kept the first ten characters of a type and dropped
- * the rest, and every later post, while the act answered ok:true. A post into the host is read back.
+ * 2.1.0 dogfood (win2): Word opened seconds before kept the first ten characters of a type and then took
+ * none at all, while the act answered ok:true. Only "nothing changed" is told for sure: any change passes.
  */
-describe("a type into Word's body is read back", () => {
+describe("a type into Word's body fails only when the page text did not change at all", () => {
   async function typeReadBack(text: string, reads: Array<string | undefined>) {
+    vi.useFakeTimers();
     const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
     const receipt = { windowHwnd: FRAME, receiverHwnd: WWG, receiverRootHwnd: FRAME, receiverAncestors: [FRAME], ancestorsComplete: true, originRootHwnd: FRAME, aimRootHwnd: FRAME, lookupRootHwnd: FRAME, ownerChain: [] };
     const queue = [...reads];
-    const readHostText = vi.fn(async () => queue.length > 1 ? queue.shift() : queue[0]);
-    const hostAnswers = vi.fn(async () => true);
+    const readHostText = vi.fn(async () => (queue.length > 1 ? queue.shift() : queue[0]));
     const keyboardPost = vi.fn(async () => {});
     const exec = createDesktopExecutor({ hwnd: String(FRAME) }, {
       uiaClick: vi.fn(), uiaSetValue: vi.fn(), cdpClick: vi.fn(), cdpFill: vi.fn(), terminalSend: vi.fn(),
       keyboardTypeBg: vi.fn(), mouseClick: vi.fn(), keyboardResolve: vi.fn(async () => receipt), keyboardPost,
-      readHostText, hostAnswers,
+      readHostText,
       windowTakesInput: () => true,
     });
-    const out = await exec(bodyOf({ hostWindowHandle: String(WWG), hostWindowClass: "_WwG" }), "type", text).then((v) => v, (e: unknown) => e);
-    return { out, readHostText, hostAnswers, keyboardPost };
+    const pending = exec(bodyOf({ hostWindowHandle: String(WWG), hostWindowClass: "_WwG" }), "type", text).then((v) => v, (e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const out = await pending;
+    vi.useRealTimers();
+    return { out, readHostText, keyboardPost };
   }
 
-  it("and succeeds when the text appears, AutoCorrect's capital and all", async () => {
-    const { out, hostAnswers } = await typeReadBack(" abc123 xyz789 END", ["Hello.", "Hello. Abc123 xyz789 END"]);
+  it("refuses as not applied when the page text read back unchanged, after six reads (win2: later types took none)", async () => {
+    const { out, readHostText, keyboardPost } = await typeReadBack("abc", ["Hello.", "Hello."]);
+    expect(keyboardPost).toHaveBeenCalledTimes(1);
+    expect((out as Error).name).toBe("ValueNotAppliedError");
+    expect((out as { callerDetail: string }).callerDetail).toMatch(/read back unchanged afterwards.*may have landed out of view.*so it is not typed twice/);
+    expect(readHostText).toHaveBeenCalledTimes(7); // before, and six after
+    expect(readHostText).toHaveBeenCalledWith(FRAME);
+  });
+
+  it("passes, unconfirmed, when the text changed at all — even only the first characters (it cannot tell which landed)", async () => {
+    const { out } = await typeReadBack(" N4TYPED-210", ["Hello.", "Hello. N4TYPED-2"]);
     expect(out).toMatchObject({ kind: "keyboard", landing: { confirmed: false } });
-    expect(hostAnswers).toHaveBeenCalledWith(WWG, 2000);
   });
 
-  it("and refuses as not applied when only the first characters arrived (win2: 10 of 12)", async () => {
-    const { out, readHostText } = await typeReadBack(" N4TYPED-210", ["Hello.", "Hello. N4TYPED-2"]);
-    expect((out as Error).name).toBe("ValueNotAppliedError");
-    expect((out as { callerDetail: string }).callerDetail).toMatch(/does not contain the text.*Part of it may have been typed\. Read the document before typing again/);
-    expect(readHostText).toHaveBeenCalledTimes(4); // before, and three reads after
+  it("passes when the change shows only on a later read (a slow Word)", async () => {
+    const { out, readHostText } = await typeReadBack("abc", ["Hello.", "Hello.", "Hello.", "Hello. abc"]);
+    expect(out).toMatchObject({ kind: "keyboard" });
+    expect(readHostText).toHaveBeenCalledTimes(4);
   });
 
-  it("and refuses when nothing arrived, even though the same text was already on the page", async () => {
-    const { out } = await typeReadBack("abc", ["abc", "abc"]);
-    expect((out as Error).name).toBe("ValueNotAppliedError");
-  });
-
-  it("and keeps the unconfirmed landing when the page text cannot be read afterwards", async () => {
+  it("passes when the page text cannot be read afterwards (an unreadable page is not 'no change')", async () => {
     const { out } = await typeReadBack("abc", ["Hello.", undefined]);
     expect(out).toMatchObject({ kind: "keyboard", landing: { confirmed: false } });
   });
 
-  it("and is not attempted for text with no letter or digit", async () => {
-    const { out, readHostText } = await typeReadBack("  ", ["x"]);
+  it("does not check when the page text could not be read before", async () => {
+    const { out, readHostText } = await typeReadBack("abc", [undefined]);
     expect(out).toMatchObject({ kind: "keyboard" });
-    expect(readHostText).not.toHaveBeenCalled();
+    expect(readHostText).toHaveBeenCalledTimes(1);
   });
 });
