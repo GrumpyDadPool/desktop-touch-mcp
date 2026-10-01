@@ -26,7 +26,7 @@ Write: `desktop_act`.
 
 | Target | 2.0.0 | 2.1.0 |
 |---|---|---|
-| Windows Terminal (`type`) | `executor_failed` | asks the user, then pastes |
+| Windows Terminal (`type`) | `executor_failed` | asks the user, then pastes (needs a client with MCP elicitation, over stdio) |
 | Word's body (`type`) | refused | typed at Word's caret |
 | Calculator's buttons | refused (`modal_blocking`, blamed on its own title bar) | pressed |
 | WinUI / WPF / web controls with a modeless Find or tool window open | refused | acted on |
@@ -39,7 +39,9 @@ the 500-element cap is reported as truncated (an Excel sheet at 100 % zoom, abou
 - **`desktop_act` can type into Windows Terminal, after asking.** Windows Terminal ignores
   characters sent to it in the background, so `desktop_act` typing into its terminal input always
   ended `executor_failed`. Now the server asks the user through the MCP client's question form
-  (what will be typed, and into which window), every time. On Accept it pastes through the foreground, as `terminal` send's `foreground_flash` does,
+  (what will be typed, and into which window), every time. **This needs a client that supports MCP
+  elicitation** (it declares the `elicitation` capability; added in MCP 2025-06-18) and the stdio
+  transport; with any other client nothing is typed. On Accept it pastes through the foreground, as `terminal` send's `foreground_flash` does,
   and puts the previous window back. Decline, Esc, no answer within 120 s, or a client that cannot
   show the question (`claude -p`, or the HTTP transport) type nothing; the act ends with the new
   reason `foreground_not_allowed` and a `detail` that says why. Its advice does not send the caller
