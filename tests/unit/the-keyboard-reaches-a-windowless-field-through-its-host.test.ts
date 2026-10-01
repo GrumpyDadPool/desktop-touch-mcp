@@ -258,12 +258,16 @@ describe("which fields are this route's (one predicate for every place that asks
  * none at all, while the act answered ok:true. Only "nothing changed" is told for sure: any change passes.
  */
 describe("a type into Word's body fails only when the page text did not change at all", () => {
-  async function typeReadBack(text: string, reads: Array<string | undefined>, takesInput: () => boolean = () => true) {
+  async function typeReadBack(text: string, reads: Array<string | undefined>, takesInput: () => boolean = () => true, entity?: UiEntity, readMs = 0) {
     vi.useFakeTimers();
     const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
-    const receipt = { windowHwnd: FRAME, receiverHwnd: WWG, receiverRootHwnd: FRAME, receiverAncestors: [FRAME], ancestorsComplete: true, originRootHwnd: FRAME, aimRootHwnd: FRAME, lookupRootHwnd: FRAME, ownerChain: [] };
+    // windowHwnd differs from the root on purpose: the read must be pinned to the receiver's root.
+    const receipt = { windowHwnd: 4242n, receiverHwnd: WWG, receiverRootHwnd: FRAME, receiverAncestors: [FRAME], ancestorsComplete: true, originRootHwnd: FRAME, aimRootHwnd: FRAME, lookupRootHwnd: FRAME, ownerChain: [] };
     const queue = [...reads];
-    const readHostText = vi.fn(async () => (queue.length > 1 ? queue.shift() : queue[0]));
+    const readHostText = vi.fn(async () => {
+      if (readMs > 0) await new Promise((r) => setTimeout(r, readMs));
+      return queue.length > 1 ? queue.shift() : queue[0];
+    });
     const keyboardPost = vi.fn(async () => {});
     const exec = createDesktopExecutor({ hwnd: String(FRAME) }, {
       uiaClick: vi.fn(), uiaSetValue: vi.fn(), cdpClick: vi.fn(), cdpFill: vi.fn(), terminalSend: vi.fn(),
@@ -271,7 +275,7 @@ describe("a type into Word's body fails only when the page text did not change a
       readHostText,
       windowTakesInput: takesInput,
     });
-    const pending = exec(bodyOf({ hostWindowHandle: String(WWG), hostWindowClass: "_WwG" }), "type", text).then((v) => v, (e: unknown) => e);
+    const pending = exec(entity ?? bodyOf({ hostWindowHandle: String(WWG), hostWindowClass: "_WwG" }), "type", text).then((v) => v, (e: unknown) => e);
     await vi.runAllTimersAsync();
     const out = await pending;
     vi.useRealTimers();
@@ -309,6 +313,23 @@ describe("a type into Word's body fails only when the page text did not change a
     const { out, keyboardPost } = await typeReadBack("abc", ["Hello."], () => (asks++ === 0));
     expect((out as Error).name).toBe("KeyboardTargetUnsafeError");
     expect(keyboardPost).not.toHaveBeenCalled();
+  });
+
+  it("stops reading at its deadline when each read is slow, and does not wait six slow reads", async () => {
+    // 1.5 s per read: before (1), then reads start at 0.2, 1.9, 3.6 s after the post — the fourth would
+    // start past the 4 s deadline.
+    const { readHostText } = await typeReadBack("abc", ["Hello.", "Hello."], () => true, undefined, 1500);
+    expect(readHostText.mock.calls.length).toBeLessThan(1 + 6);
+  });
+
+  it("does not read the page text on a keyboard road that is not a host's (a field with no recorded host)", async () => {
+    const { readHostText } = await typeReadBack("abc", ["Hello."], () => true, bodyOf({}));
+    expect(readHostText).not.toHaveBeenCalled();
+  });
+
+  it("does not read the page text for an empty type", async () => {
+    const { readHostText } = await typeReadBack("", ["Hello."]);
+    expect(readHostText).not.toHaveBeenCalled();
   });
 
   it("does not check when the page text could not be read before", async () => {

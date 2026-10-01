@@ -1477,6 +1477,13 @@ export async function getUiElements(
      * PowerShell runs into its deadline, so a caller that asks deep gives the fallback its own caps.
      */
     fallbackLimits?: { maxDepth: number; maxElements: number };
+    /**
+     * Native road only: when the native read is unavailable or fails, throw instead of falling back to
+     * PowerShell. For a caller that needs what only the native read returns (Word's page text, which
+     * the PowerShell road never reads), so a fallback is seconds spent for nothing (gate 2 on the
+     * Word read-back).
+     */
+    nativeOnly?: boolean;
   }
 ): Promise<UiElementsResult & { _cacheHit?: boolean }> {
   refuseUiaTitleIfExcluded(windowTitle, options?.pinnedHwnd);
@@ -1580,10 +1587,12 @@ export async function getUiElements(
     } catch (e) {
       // Internal #144 — a timeout on a window that does not answer is not waited for a second time.
       if (isNativeUiaTimeout(e) && targetDoesNotAnswer(windowTitle, scopeHwnd)) throw e;
+      if (options?.nativeOnly) throw e;
       console.warn("[uia-bridge] Native uiaGetElements failed, falling back to PowerShell:", e);
       // fall through to PowerShell
     }
   }
+  if (options?.nativeOnly) throw new Error("uiaGetElements: the native read is unavailable and the caller asked for it alone");
 
   // PowerShell fallback (existing implementation)
   const psMaxDepth = options?.fallbackLimits?.maxDepth ?? maxDepth;

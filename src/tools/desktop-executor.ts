@@ -2095,7 +2095,9 @@ async function keyboardRung(
  */
 async function hostTextUnchanged(d: ExecutorDeps, root: bigint, before: string): Promise<boolean> {
   let readOnce = false;
-  for (let attempt = 0; attempt < 6; attempt++) {
+  // A deadline over the whole check, so a slow or failing read cannot hold the act (gate 2).
+  const deadline = Date.now() + 4000;
+  for (let attempt = 0; attempt < 6 && Date.now() < deadline; attempt++) {
     await new Promise((r) => setTimeout(r, 200));
     const after = await d.readHostText!(root);
     if (after === undefined) continue;
@@ -3445,7 +3447,8 @@ function getSharedRealDeps(): ExecutorDeps {
         const { getUiElements } = await import("../engine/uia-bridge.js");
         // The same deep read discover takes, scoped to the window and with Word's page text (#217);
         // such a read is never answered from the cache.
-        const r = await getUiElements("", 64, 500, 8000, { pinnedHwnd: rootHwnd, readBodyText: true });
+        // Native only, and a short timeout: the PowerShell road never reads the page text (gate 2).
+        const r = await getUiElements("", 64, 500, 2000, { pinnedHwnd: rootHwnd, readBodyText: true, nativeOnly: true });
         const texts = r.elements.map((e) => e.visibleText).filter((t): t is string => typeof t === "string");
         return texts.length > 0 ? texts.join("\n") : undefined;
       } catch {

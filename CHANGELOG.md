@@ -83,7 +83,8 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
   read. **Known limitation:** once, just after Word opened, only the first ten characters of a type
   arrived and later types none, with `ok: true` (not reproduced in 18 later tries; cause unknown).
   The page text is read back after each type: if it did not change at all, the act fails
-  `value_not_applied`, but a type cut short still answers `ok: true` — check the document.
+  `value_not_applied` (a type that landed out of view can fail this way too), but a type cut short
+  still answers `ok: true` — check the document.
 
 ### New
 
