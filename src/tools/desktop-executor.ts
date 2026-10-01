@@ -2053,6 +2053,17 @@ async function keyboardRung(
   // at all" fails, and it says the text may have landed out of view.
   const hostRoot = hostHwnd !== undefined && d.readHostText !== undefined && text.length > 0 ? receipt.receiverRootHwnd ?? receipt.windowHwnd : undefined;
   const textBefore = hostRoot !== undefined ? await d.readHostText!(hostRoot) : undefined;
+  // The read takes time, and a dialog opened during it disables Word's frame: the host is asked again
+  // right before the post, so the characters are not posted behind it (PR codex on the read-back).
+  if (hostRoot !== undefined && hostHwnd !== undefined && (await takesInput(hostHwnd)) === false) {
+    probeRefusal("keyboard", "keyboard_target_unsafe", aimHwnd, entity, { why, ground: "disabled", referenceFrom: "entity", addressedWindowBy, check: "after_host_text_read" });
+    throw new KeyboardTargetUnsafeError(
+      "disabled",
+      "host_window",
+      aimHwnd !== undefined ? "handle" : "title",
+      `Refusing to type for entity ${entity.entityId}: disabled, the window it is drawn in (${hostHwnd}) stopped taking input while its page text was read`,
+    );
+  }
   await d.keyboardPost(receipt, text);
   if (hostRoot !== undefined && textBefore !== undefined && (await hostTextUnchanged(d, hostRoot, textBefore))) {
     probeRefusal("keyboard", "value_not_applied", aimHwnd, entity, { addressedWindowBy, check: "host_text_unchanged" });

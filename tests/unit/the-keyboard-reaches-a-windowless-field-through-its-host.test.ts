@@ -258,7 +258,7 @@ describe("which fields are this route's (one predicate for every place that asks
  * none at all, while the act answered ok:true. Only "nothing changed" is told for sure: any change passes.
  */
 describe("a type into Word's body fails only when the page text did not change at all", () => {
-  async function typeReadBack(text: string, reads: Array<string | undefined>) {
+  async function typeReadBack(text: string, reads: Array<string | undefined>, takesInput: () => boolean = () => true) {
     vi.useFakeTimers();
     const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
     const receipt = { windowHwnd: FRAME, receiverHwnd: WWG, receiverRootHwnd: FRAME, receiverAncestors: [FRAME], ancestorsComplete: true, originRootHwnd: FRAME, aimRootHwnd: FRAME, lookupRootHwnd: FRAME, ownerChain: [] };
@@ -269,7 +269,7 @@ describe("a type into Word's body fails only when the page text did not change a
       uiaClick: vi.fn(), uiaSetValue: vi.fn(), cdpClick: vi.fn(), cdpFill: vi.fn(), terminalSend: vi.fn(),
       keyboardTypeBg: vi.fn(), mouseClick: vi.fn(), keyboardResolve: vi.fn(async () => receipt), keyboardPost,
       readHostText,
-      windowTakesInput: () => true,
+      windowTakesInput: takesInput,
     });
     const pending = exec(bodyOf({ hostWindowHandle: String(WWG), hostWindowClass: "_WwG" }), "type", text).then((v) => v, (e: unknown) => e);
     await vi.runAllTimersAsync();
@@ -301,6 +301,14 @@ describe("a type into Word's body fails only when the page text did not change a
   it("passes when the page text cannot be read afterwards (an unreadable page is not 'no change')", async () => {
     const { out } = await typeReadBack("abc", ["Hello.", undefined]);
     expect(out).toMatchObject({ kind: "keyboard", landing: { confirmed: false } });
+  });
+
+  it("refuses, posting nothing, when a dialog disabled Word while its page text was read (PR codex)", async () => {
+    let asks = 0;
+    // The rung asks before the read (true) and again after it (false: a dialog opened meanwhile).
+    const { out, keyboardPost } = await typeReadBack("abc", ["Hello."], () => (asks++ === 0));
+    expect((out as Error).name).toBe("KeyboardTargetUnsafeError");
+    expect(keyboardPost).not.toHaveBeenCalled();
   });
 
   it("does not check when the page text could not be read before", async () => {
