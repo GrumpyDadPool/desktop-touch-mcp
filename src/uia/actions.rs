@@ -171,19 +171,16 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
             }
         };
 
+        // Read before the press: a Close or an OK that destroys itself answers nothing afterwards.
+        let name = elem.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+
         match invoke.Invoke() {
-            Ok(()) => {
-                let name = elem
-                    .CurrentName()
-                    .map(|b| b.to_string())
-                    .unwrap_or_default();
-                Ok(ActionResult {
-                    ok: true,
-                    element: Some(name),
-                    error: None,
-                    code: None,
-                })
-            }
+            Ok(()) => Ok(ActionResult {
+                ok: true,
+                element: Some(name),
+                error: None,
+                code: None,
+            }),
             Err(e) => Ok(ActionResult {
                 ok: false,
                 element: None,
