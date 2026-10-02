@@ -17,6 +17,7 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED, CoCreateInstance, CLSCTX_INPROC_SERVER,
 };
 use windows::Win32::UI::Accessibility::*;
+use windows::core::Interface;
 
 // ─── Error conversion helper ─────────────────────────────────────────────────
 
@@ -411,11 +412,44 @@ fn spawn_focus_registration(stop_rx: Receiver<()>) -> Option<thread::JoinHandle<
     }
 }
 
+/// internal #216 — the UIA client, with `AutoSetFocus` turned off.
+///
+/// By default a UIA client sets the keyboard focus to the element before a pattern method acts on
+/// it (`Invoke`, `SetValue`, ...; Microsoft's page on `IUIAutomation2::AutoSetFocus`). MEASURED win2
+/// (2026-10-02, dev/gis216-spike RESULTS-B9-G2, RESULTS-P, RESULTS-AS; raw UIA, every run starting
+/// from the user's window): that focus move is what left the foreground on GameInputSvc's
+/// message-only window when the acted-on window was closed afterwards (in front, with no owner) —
+/// `SetFocus` alone did it 3/3 with nothing pressed — and while that window is in front,
+/// `SetCursorPos` and bringing a window forward fail until the user clicks. On a window that is
+/// behind, the same focus move injects a key (0xB9) and takes the foreground. With `AutoSetFocus`
+/// off, Invoke on a WinForms check box, `SetValue` on a text box and `SetScrollPercent` on a list
+/// box still acted, in front and behind, and none of that happened (0 of 14, against 15 of 15 with
+/// it on).
+///
+/// `AutoSetFocus` is on `IUIAutomation2`, which only the `CUIAutomation8` class answers: the older
+/// `CUIAutomation` refused the interface (win2, E_NOINTERFACE). A machine without the newer class
+/// keeps the older client and its focus moves, and says so once on stderr.
+unsafe fn create_automation() -> windows::core::Result<IUIAutomation> {
+    unsafe {
+        match CoCreateInstance::<_, IUIAutomation2>(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) {
+            Ok(automation2) => {
+                if let Err(e) = automation2.SetAutoSetFocus(false) {
+                    eprintln!("[uia] AutoSetFocus could not be turned off: {e} -- UIA actions will move the keyboard focus");
+                }
+                automation2.cast()
+            }
+            Err(e) => {
+                eprintln!("[uia] CUIAutomation8 is not available: {e} -- UIA actions will move the keyboard focus");
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+            }
+        }
+    }
+}
+
 /// Build persistent COM objects that live for the entire thread lifetime.
 fn build_context() -> windows::core::Result<UiaContext> {
     unsafe {
-        let automation: IUIAutomation =
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+        let automation = create_automation()?;
 
         let walker = automation.ControlViewWalker()?;
 
