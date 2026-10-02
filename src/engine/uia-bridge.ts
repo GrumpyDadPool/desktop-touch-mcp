@@ -1813,7 +1813,7 @@ export async function clickElement(
   controlType?: string,
   /** (H3) When hwnd is provided, bypass title-based root search (fixes Save As / common dialogs). */
   options?: { hwnd?: bigint }
-): Promise<{ ok: boolean; element?: string; error?: string; code?: string; via?: "native" | "powershell"; pressedBy?: "default_action" | "invoke" }> {
+): Promise<{ ok: boolean; element?: string; error?: string; code?: string; via?: "native" | "powershell" }> {
   refuseUiaTitleIfExcluded(windowTitle, options?.hwnd);
   if (options?.hwnd !== undefined) refuseUiaHwndIfExcluded(options.hwnd);
   // ADR-036 — on the WRITE path a handle is authoritative and is never traded for a title.
@@ -1850,9 +1850,6 @@ export async function clickElement(
         error: result.error ?? undefined,
         code: result.code ?? undefined,
         via: "native",
-        // internal #216 — which pattern pressed it: buttons, check boxes, radio buttons, links and
-        // menu items through LegacyIAccessible's default action, the rest through Invoke.
-        ...((result.pressedBy === "default_action" || result.pressedBy === "invoke") && { pressedBy: result.pressedBy }),
       };
     } catch (e) {
       console.warn("[uia-bridge] Native uiaClickElement failed, falling back to PowerShell:", e);
@@ -1865,9 +1862,7 @@ export async function clickElement(
     : makeClickElementScript(windowTitle, name, automationId, controlType);
   const output = await runPS(script, 8000);
   // Which client answered — ADR-036 item 16 weighs a "not found" by it (see `UiElementsResult.via`).
-  // The managed UIA client has no LegacyIAccessible pattern, so this road presses through Invoke.
-  const parsed = JSON.parse(output) as { ok: boolean; element?: string; error?: string; code?: string };
-  return { ...parsed, via: "powershell", ...(parsed.ok && { pressedBy: "invoke" as const }) };
+  return { ...JSON.parse(output), via: "powershell" };
 }
 
 export async function setElementValue(

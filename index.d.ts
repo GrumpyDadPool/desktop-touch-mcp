@@ -115,7 +115,6 @@ export interface NativeActionResult {
   element?: string | null
   error?: string | null
   code?: string | null
-  pressedBy?: string | null
 }
 
 // ─── Element bounds ──────────────────────────────────────────────────────────

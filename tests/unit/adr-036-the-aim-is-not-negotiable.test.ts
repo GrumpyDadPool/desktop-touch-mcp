@@ -171,30 +171,6 @@ beforeEach(() => {
   unambiguous();
 });
 
-describe("a click says which pattern pressed it (internal #216)", () => {
-  it("passes the engine's answer through", async () => {
-    h.native.click = { ok: true, element: "OK", error: null, code: null, pressedBy: "default_action" };
-    expect(await clickElement("Untitled - Notepad", "OK")).toMatchObject({ ok: true, pressedBy: "default_action", via: "native" });
-    h.native.click = { ok: true, element: "OK", error: null, code: null, pressedBy: "invoke" };
-    expect(await clickElement("Untitled - Notepad", "OK")).toMatchObject({ ok: true, pressedBy: "invoke", via: "native" });
-  });
-
-  it("says nothing when the engine said nothing, or something it does not know", async () => {
-    h.native.click = { ok: true, element: "OK", error: null, code: null };
-    expect(await clickElement("Untitled - Notepad", "OK")).not.toHaveProperty("pressedBy");
-    h.native.click = { ok: true, element: "OK", error: null, code: null, pressedBy: "toggle" };
-    expect(await clickElement("Untitled - Notepad", "OK")).not.toHaveProperty("pressedBy");
-  });
-
-  it("the PowerShell road presses through Invoke, and a failed press names no pattern", async () => {
-    h.native.clickThrows = true;
-    h.psOutput = '{"ok":true,"element":"OK"}';
-    expect(await clickElement("Untitled - Notepad", "OK")).toMatchObject({ ok: true, pressedBy: "invoke", via: "powershell" });
-    h.psOutput = '{"ok":false,"error":"Element not found"}';
-    expect(await clickElement("Untitled - Notepad", "OK")).not.toHaveProperty("pressedBy");
-  });
-});
-
 describe("each answer says which client gave it (ADR-036 item 16, gate 2 on #624)", () => {
   // The two clients can see different trees and name one element differently, so a click's
   // "not found" is weighed by who read the element and who looked for it.
