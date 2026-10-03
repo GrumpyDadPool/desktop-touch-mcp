@@ -49,12 +49,17 @@ pub struct GetElementsOptions {
     /// internal #217 part 2 — read the visible text of each Word page body the walk keeps
     /// (`UiElement::visible_text`). Only `desktop_discover` asks, and only to match its `query`.
     pub read_body_text: Option<bool>,
+    /// internal #216 — read through the older client 2.0 used (`thread.rs::execute_classic_with_timeout`).
+    pub classic: Option<bool>,
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Exposed to JS as `uiaGetElements`.
 pub fn get_elements(opts: GetElementsOptions) -> napi::Result<UiElementsResult> {
+    if opts.classic == Some(true) {
+        return thread::execute_classic_with_timeout(move |ctx| get_elements_impl(ctx, &opts), DEFAULT_TIMEOUT_MS);
+    }
     thread::execute_with_timeout(
         move |ctx| get_elements_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,

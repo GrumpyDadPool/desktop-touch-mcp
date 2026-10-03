@@ -311,6 +311,8 @@ export interface NativeUia {
      * the same shape `scrollByWheelAtHwnd` already uses.
      */
     hwnd?: string;
+    /** internal #216 — through the classic client (`src/engine/uia-client-scope.ts`). */
+    classic?: boolean;
   }): Promise<NativeUiElementsResult>;
   uiaGetFocusedAndPoint?(opts: {
     cursorX: number;
@@ -331,6 +333,8 @@ export interface NativeUia {
      * the same shape `scrollByWheelAtHwnd` already uses.
      */
     hwnd?: string;
+      /** internal #216 — through the classic client (`src/engine/uia-client-scope.ts`). */
+    classic?: boolean;
   }): Promise<NativeActionResult>;
   uiaSetValue?(opts: {
     windowTitle: string;
@@ -344,6 +348,8 @@ export interface NativeUia {
      * the same shape `scrollByWheelAtHwnd` already uses.
      */
     hwnd?: string;
+      /** internal #216 — through the classic client (`src/engine/uia-client-scope.ts`). */
+    classic?: boolean;
   }): Promise<NativeActionResult>;
   uiaInsertText?(opts: {
     windowTitle: string;

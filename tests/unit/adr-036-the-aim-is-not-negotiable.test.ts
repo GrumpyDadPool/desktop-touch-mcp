@@ -66,6 +66,8 @@ const h = vi.hoisted(() => ({
     cacheProbes: [] as bigint[],
     enumerations: 0,
     nativeHwnds: [] as (string | undefined)[],
+    /** The options each native act and read was handed (internal #216: `classic`). */
+    nativeOpts: [] as Record<string, unknown>[],
   },
 }));
 
@@ -96,7 +98,7 @@ vi.mock("../../src/engine/layer-buffer.js", () => ({
 vi.mock("../../src/engine/native-engine.js", () => ({
   nativeUia: {
     async uiaClickElement(o: { hwnd?: string }) {
-      h.calls.nativeClick++; h.calls.nativeHwnds.push(o?.hwnd);
+      h.calls.nativeClick++; h.calls.nativeHwnds.push(o?.hwnd); h.calls.nativeOpts.push(o as Record<string, unknown>);
       // Two different failures, and cells on both sides of this rebase need both: `clickThrows` is
       // one call failing, after which the PowerShell script finishes the act and the answer says
       // `powershell`; `engineThrows` is "no engine at all", which is how the fallback roads open.
@@ -105,7 +107,7 @@ vi.mock("../../src/engine/native-engine.js", () => ({
       return h.native.click;
     },
     async uiaSetValue(o: { hwnd?: string }) {
-      h.calls.nativeSetValue++; h.calls.nativeHwnds.push(o?.hwnd);
+      h.calls.nativeSetValue++; h.calls.nativeHwnds.push(o?.hwnd); h.calls.nativeOpts.push(o as Record<string, unknown>);
       if (h.native.engineThrows) throw new Error("engine unavailable");
       return h.native.setValue;
     },
@@ -115,7 +117,7 @@ vi.mock("../../src/engine/native-engine.js", () => ({
       return h.native.setValue;
     },
     async uiaGetElements(o: { hwnd?: string }) {
-      h.calls.nativeElements++; h.calls.nativeHwnds.push(o?.hwnd);
+      h.calls.nativeElements++; h.calls.nativeHwnds.push(o?.hwnd); h.calls.nativeOpts.push(o as Record<string, unknown>);
       if (h.native.engineThrows) throw new Error("engine unavailable");
       return h.native.elements;
     },
@@ -171,7 +173,35 @@ beforeEach(() => {
   h.native.clickThrowMessage = undefined;
   h.native.engineThrows = false;
   h.calls.nativeHwnds = [];
+  h.calls.nativeOpts = [];
   unambiguous();
+});
+
+describe("the classic client is asked for only inside its scope, and never retried through PowerShell (internal #216)", () => {
+  it("a click and a value write in scope hand the engine `classic`; outside it, nothing", async () => {
+    const { withUiaClient } = await import("../../src/engine/uia-client-scope.js");
+    await withUiaClient("classic", () => clickElement("Untitled - Notepad", "OK"));
+    await withUiaClient("classic", () => setElementValue("Untitled - Notepad", "x", "Text"));
+    await clickElement("Untitled - Notepad", "OK");
+    expect(h.calls.nativeOpts.map((o) => o.classic)).toEqual([true, true, undefined]);
+  });
+
+  it("a classic click the engine refuses ends there, with the engine's words", async () => {
+    const { withUiaClient } = await import("../../src/engine/uia-client-scope.js");
+    h.native.clickThrows = true;
+    h.native.clickThrowMessage = "The classic UI Automation client is busy with an earlier call";
+    expect(await withUiaClient("classic", () => clickElement("Untitled - Notepad", "OK")))
+      .toEqual({ ok: false, error: "The classic UI Automation client is busy with an earlier call", via: "native" });
+    expect(h.calls.ps).toHaveLength(0);
+  });
+
+  it("a classic read is not answered from the cache", async () => {
+    const { withUiaClient } = await import("../../src/engine/uia-client-scope.js");
+    h.cached = JSON.stringify({ windowTitle: "Untitled - Notepad", elementCount: 0, elements: [], readLimits: { maxDepth: 64, maxElements: 500 } });
+    await withUiaClient("classic", () => getUiElements("Untitled - Notepad", 3, 50, 10000, { cached: true, pinnedHwnd: NOTEPAD }));
+    expect(h.calls.nativeElements).toBe(1);
+    expect(h.calls.nativeOpts.at(-1)?.classic).toBe(true);
+  });
 });
 
 describe("the engine says how it moved the focus, and only the engine (internal #216)", () => {

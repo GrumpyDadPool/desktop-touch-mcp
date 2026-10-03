@@ -38,6 +38,7 @@ const MEASURED: Array<[string, string]> = [
   // UI thread was stuck past the act client's connection timeout).
   ["Window is not answering", "target_not_answering"],
   ["Window stopped answering during the act", "target_stopped_answering"],
+  ["The classic UI Automation client is busy with an earlier call", "classic_client_busy"],
 ];
 
 describe("the classifier knows the answers the backend gave, and only those", () => {

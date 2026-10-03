@@ -5,6 +5,7 @@ import { AIM_WINDOW_GONE, AimedWindowGoneError } from "./aim.js";
 import { computeViewportPosition } from "../utils/viewport-position.js";
 import { nativeUia, nativeUiaState, type NativeUiElement } from "./native-engine.js";
 import { isExcludedTitle, isExcludedWindowHandle, isWindowGone, windowAnswers, windowsWhoseTitleContains } from "./win32.js";
+import { uiaClassicRequested } from "./uia-client-scope.js";
 import { WindowExcludedError, hasExcludedPids } from "./tool-exclusion.js";
 
 const execFileAsync = promisify(execFile);
@@ -1502,7 +1503,10 @@ export async function getUiElements(
   // looked under the other — a permanent miss, and a title-derived tree answering a scoped
   // request (2ゲート目の指摘).
   const cacheKey = options?.pinnedHwnd ?? options?.hwnd;
-  if (options?.cached && cacheKey !== undefined && !options.fetchValues && !options.readBodyText) {
+  // internal #216 — a classic read is its own client's answer: not from the cache, not cached, and
+  // not done again through PowerShell (`uia-client-scope.ts`).
+  const classic = uiaClassicRequested();
+  if (options?.cached && cacheKey !== undefined && !options.fetchValues && !options.readBodyText && !classic) {
     const cached = getCachedUia(cacheKey);
     if (cached) {
       try {
@@ -1547,6 +1551,7 @@ export async function getUiElements(
         fetchValues: options?.fetchValues ?? false,
         ...(scopeHwnd !== undefined && { hwnd: scopeHwnd.toString() }),
         ...(options?.readBodyText && { readBodyText: true }),
+        ...(classic && { classic: true }),
       });
       // Normalise: Rust returns Option<T> as undefined; TS expects null for rects
       const normalised: UiElementsResult = {
@@ -1572,7 +1577,7 @@ export async function getUiElements(
       // elements is not cached) and never under-refuses, which is the side to be wrong on.
       // Reporting `truncated` from Rust is the real fix and is its own change, not this branch's.
       const maybeTruncated = normalised.elementCount >= maxElements;
-      if (cacheKey !== undefined && !maybeTruncated) {
+      if (cacheKey !== undefined && !maybeTruncated && !classic) {
         // A body's text is for the caller's `query` alone: the cache answers other tools (#217).
         const elements = options?.readBodyText
           ? normalised.elements.map(({ visibleText: _text, ...e }) => e)
@@ -1587,12 +1592,13 @@ export async function getUiElements(
     } catch (e) {
       // Internal #144 — a timeout on a window that does not answer is not waited for a second time.
       if (isNativeUiaTimeout(e) && targetDoesNotAnswer(windowTitle, scopeHwnd)) throw e;
-      if (options?.nativeOnly) throw e;
+      if (options?.nativeOnly || classic) throw e;
       console.warn("[uia-bridge] Native uiaGetElements failed, falling back to PowerShell:", e);
       // fall through to PowerShell
     }
   }
   if (options?.nativeOnly) throw new Error("uiaGetElements: the native read is unavailable and the caller asked for it alone");
+  if (classic) throw new Error("uiaGetElements: the classic client needs the native engine, which is unavailable");
 
   // PowerShell fallback (existing implementation)
   const psMaxDepth = options?.fallbackLimits?.maxDepth ?? maxDepth;
@@ -1843,6 +1849,7 @@ export async function clickElement(
         automationId: automationId ?? undefined,
         controlType: controlType ?? undefined,
         ...(options?.hwnd !== undefined && { hwnd: options.hwnd.toString() }),
+        ...(uiaClassicRequested() && { classic: true }),
       });
       return {
         ok: result.ok,
@@ -1858,6 +1865,8 @@ export async function clickElement(
       // internal #216 — the act ran past its 8 s. The press may already be with the window, so the
       // PowerShell road below would be a second press (gate 2 on `fb2db897`).
       if (isNativeActTimeout(e)) return { ok: false, error: STOPPED_ANSWERING, via: "native" };
+      // internal #216 — a classic call is not done again through PowerShell either.
+      if (uiaClassicRequested()) return { ok: false, error: e instanceof Error ? e.message : String(e), via: "native" };
       console.warn("[uia-bridge] Native uiaClickElement failed, falling back to PowerShell:", e);
     }
   }
@@ -1899,6 +1908,7 @@ export async function setElementValue(
         name: name ?? undefined,
         automationId: automationId ?? undefined,
         ...(options?.hwnd !== undefined && { hwnd: options.hwnd.toString() }),
+        ...(uiaClassicRequested() && { classic: true }),
       });
       // `via` on a failure only: item 16 weighs a "not found" by it, and a success has nothing to
       // weigh — V1 `set_element_value` spreads this object into its reply, and gains no field.
@@ -1908,6 +1918,7 @@ export async function setElementValue(
       // internal #216 — as in `clickElement`: no second write through PowerShell after a native one
       // ran past its 8 s.
       if (isNativeActTimeout(e)) return { ok: false, error: STOPPED_ANSWERING, via: "native" };
+      if (uiaClassicRequested()) return { ok: false, error: e instanceof Error ? e.message : String(e), via: "native" };
       console.warn("[uia-bridge] Native uiaSetValue failed, falling back to PowerShell:", e);
     }
   }

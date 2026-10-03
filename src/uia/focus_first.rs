@@ -76,6 +76,7 @@ pub(crate) const NOT_ANSWERING: &str = "not_answering";
 pub(crate) const SKIPPED: &str = "skipped";
 pub(crate) const KEPT_BEHIND: &str = "kept_behind";
 pub(crate) const BY_LEGACY_TAKEFOCUS: &str = "legacy_takefocus";
+pub(crate) const BY_CLASSIC: &str = "classic";
 pub(crate) const ATTACH_FAILED: &str = "attach_failed";
 pub(crate) const FAILED: &str = "failed";
 
@@ -88,6 +89,10 @@ const UIA_FOCUS_MEASURED: [&str; 2] = ["WPF", "Chrome"];
 /// Never fails the action: a focus that could not be moved leaves the press or the write to run as
 /// it would have, and the answer says which.
 pub(crate) fn move_focus_first(ctx: &UiaContext, elem: &IUIAutomationElement) -> &'static str {
+    // The classic client moves the focus itself, as 2.0 did (`thread.rs::execute_classic_with_timeout`).
+    if ctx.classic {
+        return BY_CLASSIC;
+    }
     unsafe {
         if elem.CurrentHasKeyboardFocus().map(|b| b == true).unwrap_or(false) {
             return ALREADY;

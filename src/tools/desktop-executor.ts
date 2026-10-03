@@ -2686,7 +2686,7 @@ export function createDesktopExecutor(
           // says so and writes nothing more. Both roads refuse alike: the title road had no row and
           // an untyped error, whose published advice is a coordinate press (gate 2 on `fb2db897`).
           const valueRoadFailure = classifyUiaRouteFailure(uiaErr);
-          if (valueRoadFailure === "target_not_answering" || valueRoadFailure === "target_stopped_answering") {
+          if (valueRoadFailure === "target_not_answering" || valueRoadFailure === "target_stopped_answering" || valueRoadFailure === "classic_client_busy") {
             const why = describeUiaRouteFailure(valueRoadFailure);
             probeRefusal("uia_set_value", "aim_route_failed", aimHwnd, entity, { routeFailure: valueRoadFailure, addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
             throw new AimedRouteFailedError(
@@ -2909,7 +2909,7 @@ export function createDesktopExecutor(
         // internal #216 — nor is a window that did not answer pressed by its remembered point: the UIA
         // press may still be pending with it, and the point may be under another window by now
         // (gate 2 on `fb2db897`).
-        if (routeFailure === "target_not_answering" || routeFailure === "target_stopped_answering") {
+        if (routeFailure === "target_not_answering" || routeFailure === "target_stopped_answering" || routeFailure === "classic_client_busy") {
           probeRefusal("uia_downgrade", "aim_route_failed", undefined, entity, { routeFailure, readVia, clickVia, addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
           throw new AimedRouteFailedError(
             `UIA click for "${entity.label ?? entity.entityId}" on the title-only road: ${routeFailure}. Not pressing where it used to be.`,

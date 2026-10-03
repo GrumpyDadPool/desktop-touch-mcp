@@ -68,7 +68,8 @@ export type UiaRouteFailure =
   | "element_disabled"
   | "element_read_only"
   | "target_not_answering"
-  | "target_stopped_answering";
+  | "target_stopped_answering"
+  | "classic_client_busy";
 
 /** Written by the bridge itself (script and native), so they arrive as the whole message. */
 const WHOLE: ReadonlyMap<string, UiaRouteFailure> = new Map([
@@ -87,6 +88,9 @@ const WHOLE: ReadonlyMap<string, UiaRouteFailure> = new Map([
   // running past its own 8 s (`uia-bridge.ts`). The request may already be with the window and run
   // when it answers (gate 2 on `fb2db897`), so it is not reported as nothing done.
   ["Window stopped answering during the act", "target_stopped_answering"],
+  // internal #216 — `src/uia/thread.rs::CLASSIC_BUSY`: an earlier `uiaClient: "classic"` call still
+  // holds the classic client's thread.
+  ["The classic UI Automation client is busy with an earlier call", "classic_client_busy"],
 ]);
 
 /** .NET's text inside PowerShell's method-invocation wrapper — the wrapper names the method. */
@@ -118,6 +122,8 @@ export function describeUiaRouteFailure(kind: UiaRouteFailure): string {
       return "the element the route matched is read-only";
     case "target_not_answering":
       return "the window did not answer UI Automation for 7 seconds (it may be busy), so nothing was sent to it — wait and try again";
+    case "classic_client_busy":
+      return "an earlier call through the classic client (uiaClient: \"classic\") is still running, so nothing was sent — wait and try again, or use the default client";
     case "target_stopped_answering":
       return "the window stopped answering UI Automation during the press or write (it may be busy); it may still take effect when the window answers — look at it before trying again, so it is not done twice";
   }

@@ -14,6 +14,7 @@
  *     (each hwnd/tabId/windowTitle has its own LeaseStore and generation counter).
  */
 
+import { withUiaClient, CLASSIC_NOTE, type UiaClient } from "../engine/uia-client-scope.js";
 import { z } from "zod";
 import {
   landingAdvice,
@@ -845,6 +846,17 @@ const leaseSchema = z.object({
   evidenceDigest:   z.string(),
 });
 
+// internal #216 — the user's decision (2026-10-03): an agent the default client cannot serve may choose
+// the classic one, told what it costs (`src/engine/uia-client-scope.ts`).
+const uiaClientSchema = z.enum(["default", "classic"]).optional().describe(
+  "'classic' reads or acts through the UI Automation client 2.0 used. Use it only when the default client " +
+  "cannot read or act on a window. While it acts it moves the keyboard focus: a window behind can come to " +
+  "the front and take keys typed meanwhile, and after the window closes the foreground can be left on an " +
+  "invisible window, where the mouse and window switching fail until the user clicks. It also waits as long " +
+  "as a busy window stays busy; the call still answers within 8 s, and further 'classic' calls are refused " +
+  "until it finishes. The client is released after each call.",
+);
+
 // Phase 4 (Codex PR #41 P1): exported so run_macro DSL can register
 // desktop_discover / desktop_act in its own TOOL_REGISTRY without duplicating
 // the schema literals.
@@ -854,6 +866,7 @@ export const desktopSeeSchema = {
   query:       z.string().optional().describe("Filter entities by label substring (case-insensitive). A Word page also matches by the text visible on it, which is not returned"),
   maxEntities: z.number().int().min(1).max(200).optional().describe("Override entity count limit"),
   debug:       coercedBoolean().optional().describe("Include raw screen coordinates in response (debug only — never relay to end-users)"),
+  uiaClient:   uiaClientSchema,
 };
 
 export const desktopTouchSchema = {
@@ -867,6 +880,7 @@ export const desktopTouchSchema = {
     "when the keyboard road writes it instead (executor 'keyboard'), the text is inserted at the caret."
   ),
   text:   z.string().optional().describe("Text to type or set (required when action='type' or action='setValue')."),
+  uiaClient: uiaClientSchema,
   returnCapture: z.enum(["on-change", "always", "never"]).optional().describe(
     "[EXPERIMENTAL] ADR-024 Seed-2 — controls the post-action ROI capture on visual-only targets " +
     "(UIA-blind / RDP / canvas). When it attaches, a successful act carries a 'roiCapture' " +
@@ -921,7 +935,28 @@ export function validateDesktopTouchTextRequirement(
 /** desktop_discover (query-axis) raw handler. Calls into the facade
  *  unchanged; the L5 query wrapper takes care of envelope assembly +
  *  compat hoist + per-call `include` opt-in. */
-export const desktopDiscoverRawHandler = async (input: unknown): Promise<ToolResult> => {
+export const desktopDiscoverRawHandler = (input: unknown): Promise<ToolResult> =>
+  withClassicNote((input as { uiaClient?: UiaClient } | undefined)?.uiaClient, () => desktopDiscoverRawHandlerInner(input));
+
+/**
+ * internal #216 — run a call with the UI Automation client it asked for in scope, and say so on a reply
+ * made through the classic one (`uia-client-scope.ts`). The note goes on the reply's JSON, whichever
+ * of the handler's returns produced it; a reply that is not JSON is left as it is.
+ */
+export async function withClassicNote(client: UiaClient | undefined, run: () => Promise<ToolResult>): Promise<ToolResult> {
+  const result = await withUiaClient(client, run);
+  if (client !== "classic") return result;
+  const [first, ...rest] = result.content;
+  if (first?.type !== "text") return result;
+  try {
+    const body = JSON.parse(first.text) as Record<string, unknown>;
+    return { ...result, content: [{ type: "text" as const, text: JSON.stringify({ ...body, uiaClient: { client: "classic", note: CLASSIC_NOTE } }, null, 2) }, ...rest] };
+  } catch {
+    return result;
+  }
+}
+
+const desktopDiscoverRawHandlerInner = async (input: unknown): Promise<ToolResult> => {
   const facade = getDesktopFacade();
   const output = await facade.see(input as DesktopSeeInput);
   // internal #211 (D) — watch the window from now to the act, to learn whether it repaints itself.
@@ -967,7 +1002,11 @@ async function startPreActWatch(facade: DesktopFacade, viewId: string, opt: { af
  *  `DESKTOP_TOUCH_STAGE5_DXGI !== "0"` (default ON; opt-out by setting
  *  to `"0"`). Failures degrade silently — observation absence is
  *  bit-equal to the pre-Stage-5 envelope. */
-export const desktopActRawHandler = async (
+export const desktopActRawHandler = (
+  input: { lease: EntityLease; action?: TouchAction; text?: string; returnCapture?: ReturnCaptureMode; uiaClient?: UiaClient },
+): Promise<ToolResult> => withClassicNote(input?.uiaClient, () => desktopActRawHandlerInner(input));
+
+const desktopActRawHandlerInner = async (
   // ADR-024 Seed-2 S1: `returnCapture` is accepted (and advertised in the schema)
   // so callers can start opting in; population of `result.roiCapture` is wired in
   // S2+ (gate plumbing). In S1 the field is always absent — existing responses are

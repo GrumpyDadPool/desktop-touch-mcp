@@ -26,6 +26,8 @@ pub struct ClickElementOptions {
     /// ADR-036 — act on THIS window, rather than the first one whose name contains `window_title`.
     /// A decimal handle as a string; see `GetElementsOptions::hwnd`.
     pub hwnd: Option<String>,
+    /// internal #216 — act through the older client 2.0 used (`thread.rs::execute_classic_with_timeout`).
+    pub classic: Option<bool>,
 }
 
 #[napi_derive::napi(object)]
@@ -38,6 +40,8 @@ pub struct SetValueOptions {
     /// ADR-036 — act on THIS window, rather than the first one whose name contains `window_title`.
     /// A decimal handle as a string; see `GetElementsOptions::hwnd`.
     pub hwnd: Option<String>,
+    /// internal #216 — as on `ClickElementOptions`.
+    pub classic: Option<bool>,
 }
 
 #[napi_derive::napi(object)]
@@ -55,6 +59,9 @@ pub struct InsertTextOptions {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 pub fn click_element(opts: ClickElementOptions) -> napi::Result<ActionResult> {
+    if opts.classic == Some(true) {
+        return thread::execute_classic_with_timeout(move |ctx| click_element_impl(ctx, &opts), DEFAULT_TIMEOUT_MS);
+    }
     thread::execute_act_with_timeout(
         move |ctx| click_element_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,
@@ -62,6 +69,9 @@ pub fn click_element(opts: ClickElementOptions) -> napi::Result<ActionResult> {
 }
 
 pub fn set_value(opts: SetValueOptions) -> napi::Result<ActionResult> {
+    if opts.classic == Some(true) {
+        return thread::execute_classic_with_timeout(move |ctx| set_value_impl(ctx, &opts), DEFAULT_TIMEOUT_MS);
+    }
     thread::execute_act_with_timeout(
         move |ctx| set_value_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,

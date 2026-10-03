@@ -39,6 +39,9 @@ pub(crate) struct UiaContext {
     /// ControlView filter for `FindAllBuildCache(TreeScope_Children)`.
     /// Created once and reused — matches the ControlViewWalker scope.
     pub control_view_condition: IUIAutomationCondition,
+    /// internal #216 — true only for a context built by `execute_classic_with_timeout`: the older
+    /// `CUIAutomation`, with its own focus moves, so `focus_first.rs` leaves the focus to it.
+    pub classic: bool,
 }
 
 /// internal #216 — the two clients the COM thread holds, one for reads and one for acts. **Both are
@@ -490,8 +493,17 @@ const CONNECTION_TIMEOUT_MS: u32 = 7_000;
 
 /// Build persistent COM objects that live for the entire thread lifetime.
 fn build_context() -> windows::core::Result<UiaContext> {
+    unsafe { context_from(create_automation()?, false) }
+}
+
+/// The context of the older client (`execute_classic_with_timeout`).
+fn build_classic_context() -> windows::core::Result<UiaContext> {
+    unsafe { context_from(CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?, true) }
+}
+
+/// The walker, cache requests and condition every context carries, on `automation`.
+unsafe fn context_from(automation: IUIAutomation, classic: bool) -> windows::core::Result<UiaContext> {
     unsafe {
-        let automation = create_automation()?;
 
         let walker = automation.ControlViewWalker()?;
 
@@ -516,6 +528,7 @@ fn build_context() -> windows::core::Result<UiaContext> {
             cache_request: cr,
             tree_cache_request: tree_cr,
             control_view_condition: cv_condition,
+            classic,
         })
     }
 }
@@ -596,6 +609,85 @@ where
                 napi::Error::from_reason("UIA COM thread disconnected")
             }
         })?
+}
+
+// ─── The classic client (internal #216) ───────────────────────────────────────
+
+/// What a `classic` call answers when the classic thread is still in a previous call. Matched whole
+/// by the TS side (`uia-route-failure.ts`), which does not retry it through PowerShell.
+pub(crate) const CLASSIC_BUSY: &str = "The classic UI Automation client is busy with an earlier call";
+
+type ClassicTask = Box<dyn FnOnce() + Send + 'static>;
+
+static CLASSIC_SENDER: OnceLock<Sender<ClassicTask>> = OnceLock::new();
+static CLASSIC_IN_USE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// internal #216 — run `f` on the older `CUIAutomation`, the client 2.0 used, when a caller asks for
+/// it (`uiaClient: "classic"`). The user's decision (2026-10-03): an agent that the default client
+/// cannot serve may choose it, knowing the cost.
+///
+/// Its own thread, so that what it costs stays with it. MEASURED win2 2026-10-03: that class has no
+/// connection or transaction limit, and a press on a WinForms button that opens a modal box held it
+/// until the box closed (`RESULTS-R27.md`, 31 s with the box left open 30 s); on the shared COM
+/// thread every other UI Automation call would have waited too. Here the caller still gets its answer
+/// within `timeout_ms`, and a second `classic` call is refused while the first is still running.
+///
+/// A client made for one call and released after it. MEASURED the same day (`RESULTS-R25d.md`): an
+/// "on" client that had touched a window made later writes from the "off" clients move the focus
+/// for that window, and releasing its elements and the client ended it. The context is built inside
+/// the task and dropped before the task returns, whatever `f` answers.
+pub(crate) fn execute_classic_with_timeout<F, T>(f: F, timeout_ms: u32) -> napi::Result<T>
+where
+    F: FnOnce(&UiaContext) -> napi::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    use std::sync::atomic::Ordering;
+    if CLASSIC_IN_USE.swap(true, Ordering::SeqCst) {
+        return Err(napi::Error::from_reason(CLASSIC_BUSY));
+    }
+    let (reply_tx, reply_rx) = bounded(1);
+    let task: ClassicTask = Box::new(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let ctx = build_classic_context().map_err(win_err)?;
+            let answer = f(&ctx);
+            drop(ctx);
+            answer
+        }))
+        .unwrap_or_else(|_| Err(napi::Error::from_reason("The classic UI Automation call panicked")));
+        CLASSIC_IN_USE.store(false, Ordering::SeqCst);
+        let _ = reply_tx.send(result);
+    });
+    if classic_sender().send(task).is_err() {
+        CLASSIC_IN_USE.store(false, Ordering::SeqCst);
+        return Err(napi::Error::from_reason("The classic UI Automation thread is unavailable"));
+    }
+    reply_rx
+        .recv_timeout(Duration::from_millis(timeout_ms as u64))
+        .map_err(|e| match e {
+            crossbeam_channel::RecvTimeoutError::Timeout => {
+                napi::Error::from_reason(format!("UIA operation timed out after {timeout_ms}ms"))
+            }
+            crossbeam_channel::RecvTimeoutError::Disconnected => {
+                napi::Error::from_reason("The classic UI Automation thread is unavailable")
+            }
+        })?
+}
+
+fn classic_sender() -> &'static Sender<ClassicTask> {
+    CLASSIC_SENDER.get_or_init(|| {
+        let (tx, rx) = unbounded::<ClassicTask>();
+        let _ = thread::Builder::new().name("uia-classic".into()).spawn(move || {
+            // Safety: COM is initialised once on this thread, which lives for the process.
+            if unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_err() {
+                eprintln!("[uia-classic] CoInitializeEx failed -- classic calls are unavailable");
+                return;
+            }
+            while let Ok(task) = rx.recv() {
+                task();
+            }
+        });
+        tx
+    })
 }
 
 #[cfg(test)]
