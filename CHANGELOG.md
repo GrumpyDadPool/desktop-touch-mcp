@@ -1,37 +1,37 @@
 # Changelog
 
-## [2.1.0] - 2026-10-01 — `desktop_discover` reads UI Automation by element count, not depth: web pages, Explorer, Settings and Word come within reach, and `desktop_act` types into Windows Terminal after asking
+## [2.1.0] - 2026-10-xx — Deeper UI Automation reads: more to see and more to act on. Acts no longer deadlock the mouse and window switching
 
-The main change: `desktop_discover`'s UI Automation read used to stop at depth 4, and now goes to
-depth 64 and stops at 500 elements. Browsers, Electron apps, Explorer and Settings keep their controls
-below depth 4, so 2.0 called them blind or left values out; 2.1 reads them, and what it reads can be
-acted on. What UIA still cannot see falls back to OCR and Set-of-Marks as before. What comes back
-after an act is also more accurate, and `desktop_act` now types into Word's body, and into Windows
-Terminal after asking the user. Nothing is removed or renamed.
+Two changes. `desktop_discover`'s UI Automation read used to stop at depth 4, and now goes to
+depth 64 and stops at 500 elements: browsers, Electron apps, Explorer, Settings and Word keep their
+controls below depth 4, so 2.1 sees them and can act on them. And UI Automation is now handled so
+that an act no longer leaves Windows unable to move the mouse or bring a window forward, takes the
+window you are using, or sends your keys elsewhere. What UIA still cannot see falls back to OCR and
+Set-of-Marks as before. Nothing is removed or renamed.
 
 ### Reads deeper: what 2.1 reads and acts on that 2.0 did not
 
 Read: a default `desktop_discover`, elements read / time. Measured on one Windows 11 machine on
-2026-09-29, the read as in 2.0.0 against the read as in 2.1.0.
+2026-10-03: the published 2.0.0 against 2.1.0, the first read after starting the server, median of 3.
 
 | Window | 2.0.0 | 2.1.0 |
 |---|---|---|
-| Chrome page | blind (6 elements, OCR) / 403 ms | the page's controls (45) / 101 ms |
-| VS Code | blind (6, OCR) / 395 ms | 128 elements / 169 ms |
-| Edge | blind (15) / 487 ms | 108 elements / 247 ms |
-| Long pages (Wikipedia, GitHub, NHK) | blind, OCR / 467–512 ms | 53–179 elements / 109–275 ms |
-| Explorer | the item count missing (47) / 180 ms | included (112) / 390 ms |
-| Settings | the About values missing (20) / 76 ms | included (73) / 154 ms |
+| Chrome page | blind (6 elements, OCR) / 387 ms | the page's controls (45) / 186 ms |
+| VS Code | blind (6, OCR) / 389 ms | 128 elements / 201 ms |
+| Edge | blind (7, OCR) / 451 ms | 62–78 elements / 210 ms |
+| Long pages (Wikipedia, GitHub, NHK) | blind, OCR / 424–516 ms | 53–185 elements / 171–271 ms |
+| Explorer | the item count missing (45) / 135 ms | included (111) / 290 ms |
+| Settings (About) | the device's values missing (20) / 86 ms | included (73) / 203 ms |
 | Word | the body not listed | each visible page's body, as a `textbox` |
+| Store Notepad | its text as a label to read | a `textbox` that `type` reaches |
 
 Act: `desktop_act`.
 
 | Target | 2.0.0 | 2.1.0 |
 |---|---|---|
 | Windows Terminal (`type`) | `executor_failed` | asks the user, then pastes (needs a client with MCP elicitation, over stdio) |
-| Word's body (`type`) | refused | typed at Word's caret |
-| Calculator's buttons | refused (`modal_blocking`, blamed on its own title bar) | pressed |
-| WinUI / WPF / web controls with a modeless Find or tool window open | refused | acted on |
+| Word's body (`type`) | not listed, so not typed | typed at Word's caret |
+| Calculator's digit buttons | not found, even by `query` | found by `query`, and pressed |
 
 A browser or Electron window lists its page's controls first, ahead of the browser's tabs and
 toolbar, when web content covers at least half the window. A read that fills the 500-element cap is
@@ -45,15 +45,36 @@ UIA read is sparse. The one difference: a window UIA now reads, such as a browse
 sent to OCR automatically. For text UIA does not expose (a spreadsheet cell, a page's body text), use
 `screenshot(detail: "ocr")`.
 
+### UI Automation handled correctly: no more input deadlock
+
+In 2.0, pressing or writing to a control through UI Automation could leave Windows in a state where
+the mouse could not be moved and no window could be brought forward until you clicked: when the window
+acted on closed, the foreground was left on an invisible system window (GameInputSvc's), and
+everything that needs the foreground failed from then on. In our runs on WinForms controls, 2.0 fell
+into it every time.
+
+The cause was UI Automation moving the keyboard focus to the target before each press or write. 2.1
+turns that off and moves the focus itself, by roads that do not take the foreground:
+
+- **No deadlock.** After presses and writes on Win32 and WinForms controls, closing the window leaves
+  the foreground where it was. In the same runs, 2.1 fell into it 0 times.
+- **Your window and keys stay yours.** The same focus move used to bring a window that was behind to
+  the front, and the keys you were typing went into it. Win32 and WinForms controls, and browser
+  pages behind another window, are now acted on without coming to the front. A value written before
+  a press is still committed, as when you click.
+- **A busy window is waited for up to 7 s, then reported as not answering** (`aim_route_failed`),
+  and nothing is typed or pressed another way. When it stopped answering mid-act, the `detail` says
+  the act may still take effect.
+
 ### What comes back after an act is more accurate
 
 | After an act | 2.0.0 | 2.1.0 |
 |---|---|---|
-| `observation` after a UI Automation press | `no_change` in 83 of 88 successful acts: the repaint came while the press returned, and was missed | the repaint is seen: regions are collected from before the act to 150 ms after it, and 500 px or more inside the window is a change |
+| `observation` after a UI Automation press | `no_change` on the first act after starting (2 of 4): the repaint came while the press returned, and was missed | the repaint is seen (6 of 6): regions are collected from before the act to 150 ms after it, and 500 px or more inside the window is a change |
 | A window that repaints itself (a console cursor, some WinForms and Java windows) | — | `motion: "indeterminate"`, `selfRepainting: true` when seen repainting twice, 300 ms or more apart, since the last discover or act (`observation.watchedBeforeMs`) |
-| Rich narration, a value shown in a name (a calculator's display, an item count) | one element gone, another appeared | `post.rich.nameDeltas` (`type`, `before`, `after`; up to 3) |
+| Rich narration, a value shown in a name (a calculator's display, an item count) | one element gone, another appeared | `post.rich.nameDeltas` (`type`, `before`, `after`; up to 3; a control replaced by one of another type is reported as gone and appeared) |
 | Rich narration, a window the act retitled (typing in Notepad, opening a folder in Explorer) | `timeout` | the diff, read by the window's handle |
-| `desktop_discover` after a change made outside `desktop_act` (another program, COM, an Alt-Tab) | the previous read, up to 30 s old | read again on every call (65 ms for Notepad, about 350 ms for an Excel sheet) |
+| `desktop_discover` after a change made outside `desktop_act` (another program, COM, an Alt-Tab) | the previous read, up to 30 s old | read again on every call (22–25 ms for Notepad) |
 
 The screen's changed regions do not say which window drew them, so another window repainting over
 the target, or the target's own activation, still counts as a change. Rich narration withholds a diff
@@ -71,7 +92,8 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
   nothing and ends `foreground_not_allowed` with a `detail`; do not type into the terminal another way
   after a no. The question shows the whole text with the window's title and selected tab (one line,
   600 characters in all; a trailing newline is Enter) and says where the window is when another has
-  its title; two in the same place are refused. Nothing is typed if the window or tab changed while the user answered, into a tab split
+  its title; two in the same place are refused. Text with characters the question cannot show
+  (control and invisible characters) is refused; emoji, keycaps and flags are asked about. Nothing is typed if the window or tab changed while the user answered, into a tab split
   into panes, into a terminal that is the window in front, when the tool call was cancelled, or when
   the terminal's input will not take the keyboard focus (`terminal_focus_failed`; an open find box
   would otherwise take the text).
@@ -88,6 +110,11 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
 
 ### New
 
+- `desktop_discover` and `desktop_act` take `uiaClient: "classic"`, which reads or acts through the
+  UI Automation client 2.0 used, for a window the default client cannot serve. It moves the keyboard
+  focus as 2.0 did, with the costs listed above; it waits as long as a busy window stays busy, but
+  the call still answers within 8 s and another `classic` call is refused until it finishes; and it
+  is released after each call. A reply made through it says so (`uiaClient`).
 - `workspace_launch` returns the window it found as `windowTitle`, `hwnd` and `pid` (`foundWindow`
   stays). Its description names the parameter it takes, `waitMs` (default 2000), not `timeoutMs` or
   `detach`. It now prefers a new window over an existing one that only retitled, so a single-instance
@@ -122,6 +149,7 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
   Git Bash (mintty) and ConEmu are now read as ordinary windows.
 - **`desktop_discover` no longer answers from a cache.** `freshness.from` is `read`, or `unavailable`
   when the read failed; a failed read no longer returns the previous read as `staleCache`.
+- The README's details moved to `docs/guide.md` (English) and `docs/guide.ja.md` (Japanese).
 
 ### Fixed
 
@@ -139,6 +167,14 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
 - `desktop_discover` addressed by `hwnd` reports the window's title in `target.title`, not the hwnd
   (a window missing from the reply's `windows` list still reports the hwnd).
 - The `keyboard` advice's `desktop_discover` example uses a target the tool accepts.
+
+### Known limitations
+
+- A WPF window behind another comes to the front when acted on, and keys typed meanwhile can go into
+  it.
+- A Win32 menu item that opens a submenu can still leave the foreground on the invisible system window
+  after the window closes.
+- The PowerShell fallback, used when the native engine is unavailable, moves the focus as 2.0 did.
 
 ## [2.0.0] - 2026-09-24 — An action that cannot be done is refused, not reported as done
 
