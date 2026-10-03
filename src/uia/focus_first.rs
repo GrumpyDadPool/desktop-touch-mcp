@@ -19,6 +19,13 @@
 //! - **WPF and Chromium** (no window of their own): UI Automation's own `SetFocus`. No fall and the
 //!   value committed, but with the window behind it takes the foreground, and most keys typed
 //!   meanwhile go to that window (153–183 of 200) — as the default client does there.
+//! - **Except Chromium behind another window** (`"kept_behind"`): its focus is not moved. MEASURED win2
+//!   2026-10-03 (`RESULTS-R22b.md`, plain UIA, a key-counting window in front receiving 200 keys):
+//!   moving it took the foreground 3/3 and the front window received 23–26 keys; not moving it kept
+//!   the foreground 3/3, all 200 arrived, and the page still committed (its `input` and `change`
+//!   fire on the write itself, model new 3/3). WPF lost its commit the same way (a LostFocus binding
+//!   saved the old value 3/3), so WPF keeps the move until a road that commits without the
+//!   foreground is found. The user's decision (2026-10-03).
 //! - **Anything else is left where it is** (`"skipped"`): a Win32 or WinForms element with no window
 //!   of its own (a toolbar or ToolStrip button, a tree item, a tab, a grid cell, a menu item), and
 //!   every framework not measured. UI Automation's `SetFocus` is the very call that raised the fall
@@ -38,8 +45,8 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetWindowThreadProcessId, IsHungAppWindow, SMTO_ABORTIFHUNG,
-    SendMessageTimeoutW, WM_NULL,
+    GA_ROOT, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsHungAppWindow,
+    SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL,
 };
 
 use super::thread::UiaContext;
@@ -59,6 +66,7 @@ pub(crate) const BY_UIA: &str = "uia";
 pub(crate) const ALREADY: &str = "already";
 pub(crate) const NOT_ANSWERING: &str = "not_answering";
 pub(crate) const SKIPPED: &str = "skipped";
+pub(crate) const KEPT_BEHIND: &str = "kept_behind";
 pub(crate) const ATTACH_FAILED: &str = "attach_failed";
 pub(crate) const FAILED: &str = "failed";
 
@@ -85,12 +93,36 @@ pub(crate) fn move_focus_first(ctx: &UiaContext, elem: &IUIAutomationElement) ->
         if !UIA_FOCUS_MEASURED.contains(&framework.as_str()) {
             return SKIPPED;
         }
+        // A window that cannot be shown to be in front counts as behind: on Chromium the cost of not
+        // moving is nothing measured, the cost of moving is the user's foreground and keys.
+        if framework == "Chrome" && !window_is_in_front(ctx, elem) {
+            return KEPT_BEHIND;
+        }
         match elem.SetFocus() {
             Ok(()) => BY_UIA,
             Err(_) => FAILED,
         }
     }
 }
+
+/// Whether the top-level window `elem` is drawn in is the foreground window: the nearest window found
+/// walking up from the element (Chromium's page sits in a child window of its own), then its root.
+unsafe fn window_is_in_front(ctx: &UiaContext, elem: &IUIAutomationElement) -> bool {
+    unsafe {
+        let mut current = Some(elem.clone());
+        for _ in 0..WINDOW_SEARCH_DEPTH {
+            let Some(e) = current else { return false };
+            if let Some(h) = own_window(&e) {
+                return GetAncestor(h, GA_ROOT).0 == GetForegroundWindow().0;
+            }
+            current = ctx.walker.GetParentElement(&e).ok();
+        }
+        false
+    }
+}
+
+/// How far up `window_is_in_front` looks for a window. A page's elements can sit deep in its tree.
+const WINDOW_SEARCH_DEPTH: usize = 64;
 
 /// The element's own window, when it has one. Zero is "none": UIA answers it for an element drawn
 /// inside another window.
