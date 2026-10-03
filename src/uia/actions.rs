@@ -12,6 +12,8 @@ use super::tree::{resolve_root, CACHE_BUILD_FAILED_PREFIX};
 use super::types::*;
 
 const DEFAULT_TIMEOUT_MS: u32 = 8_000;
+/// Time kept free before the act's limit for a deferred focus move (`set_value_impl`).
+const DEFERRED_FOCUS_ROOM_MS: u32 = 2_000;
 const MAX_SEARCH_DEPTH: u32 = 14;
 
 // ─── Options from JS ─────────────────────────────────────────────────────────
@@ -69,11 +71,16 @@ pub fn click_element(opts: ClickElementOptions) -> napi::Result<ActionResult> {
 }
 
 pub fn set_value(opts: SetValueOptions) -> napi::Result<ActionResult> {
+    // The caller's clock: the timeout below starts when the task is queued, not when it runs.
+    let submitted = std::time::Instant::now();
     if opts.classic == Some(true) {
-        return thread::execute_classic_with_timeout(move |ctx| set_value_impl(ctx, &opts), DEFAULT_TIMEOUT_MS);
+        return thread::execute_classic_with_timeout(
+            move |ctx| set_value_impl(ctx, &opts, submitted),
+            DEFAULT_TIMEOUT_MS,
+        );
     }
     thread::execute_act_with_timeout(
-        move |ctx| set_value_impl(ctx, &opts),
+        move |ctx| set_value_impl(ctx, &opts, submitted),
         DEFAULT_TIMEOUT_MS,
     )
 }
@@ -220,8 +227,11 @@ fn failure_text(e: &windows::core::Error) -> String {
     if super::is_timeout(e) { super::STOPPED_ANSWERING.to_string() } else { format!("{e}") }
 }
 
-fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<ActionResult> {
-    let impl_started = std::time::Instant::now();
+fn set_value_impl(
+    ctx: &UiaContext,
+    opts: &SetValueOptions,
+    submitted: std::time::Instant,
+) -> napi::Result<ActionResult> {
     let window = match resolve_root(ctx, opts.hwnd.as_deref(), &opts.window_title) {
         Ok(w) => w,
         Err(e) => {
@@ -397,10 +407,13 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 // otherwise read as the write having taken (gate 1 on `f2e3b75f`). And not when the
                 // write itself took long: the caller may already have been told the window stopped
                 // answering, and a focus move landing later would surprise it (gate 2 on `f2e3b75f`).
-                // Half the act's limit, as this clock starts after any wait in the thread's queue.
+                // Measured on the caller's clock, from when the task was queued (gate 1 on
+                // `f4f1af62`), with room left for the move itself.
                 if !move_first
-                    && impl_started.elapsed()
-                        < std::time::Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS / 2))
+                    && submitted.elapsed()
+                        < std::time::Duration::from_millis(u64::from(
+                            DEFAULT_TIMEOUT_MS - DEFERRED_FOCUS_ROOM_MS,
+                        ))
                 {
                     focused_by = super::focus_first::move_focus_first(ctx, &elem);
                 }
