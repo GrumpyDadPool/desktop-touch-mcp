@@ -5,7 +5,7 @@ import { AIM_WINDOW_GONE, AimedWindowGoneError } from "./aim.js";
 import { computeViewportPosition } from "../utils/viewport-position.js";
 import { nativeUia, nativeUiaState, type NativeUiElement } from "./native-engine.js";
 import { isExcludedTitle, isExcludedWindowHandle, isWindowGone, windowAnswers, windowsWhoseTitleContains } from "./win32.js";
-import { uiaClassicRequested } from "./uia-client-scope.js";
+import { markClassicUsed, uiaClassicRequested } from "./uia-client-scope.js";
 import { WindowExcludedError, hasExcludedPids } from "./tool-exclusion.js";
 
 const execFileAsync = promisify(execFile);
@@ -1553,6 +1553,7 @@ export async function getUiElements(
         ...(options?.readBodyText && { readBodyText: true }),
         ...(classic && { classic: true }),
       });
+      if (classic) markClassicUsed();
       // Normalise: Rust returns Option<T> as undefined; TS expects null for rects
       const normalised: UiElementsResult = {
         windowTitle: result.windowTitle,
@@ -1592,6 +1593,7 @@ export async function getUiElements(
     } catch (e) {
       // Internal #144 — a timeout on a window that does not answer is not waited for a second time.
       if (isNativeUiaTimeout(e) && targetDoesNotAnswer(windowTitle, scopeHwnd)) throw e;
+      if (classic && classicCallReached(e)) markClassicUsed();
       if (options?.nativeOnly || classic) throw e;
       console.warn("[uia-bridge] Native uiaGetElements failed, falling back to PowerShell:", e);
       // fall through to PowerShell
@@ -1851,6 +1853,7 @@ export async function clickElement(
         ...(options?.hwnd !== undefined && { hwnd: options.hwnd.toString() }),
         ...(uiaClassicRequested() && { classic: true }),
       });
+      if (uiaClassicRequested()) markClassicUsed();
       return {
         ok: result.ok,
         element: result.element ?? undefined,
@@ -1864,12 +1867,15 @@ export async function clickElement(
     } catch (e) {
       // internal #216 — the act ran past its 8 s. The press may already be with the window, so the
       // PowerShell road below would be a second press (gate 2 on `fb2db897`).
+      if (uiaClassicRequested() && classicCallReached(e)) markClassicUsed();
       if (isNativeActTimeout(e)) return { ok: false, error: STOPPED_ANSWERING, via: "native" };
       // internal #216 — a classic call is not done again through PowerShell either.
       if (uiaClassicRequested()) return { ok: false, error: e instanceof Error ? e.message : String(e), via: "native" };
       console.warn("[uia-bridge] Native uiaClickElement failed, falling back to PowerShell:", e);
     }
   }
+  // internal #216 — nor run there when the engine is missing (codex on `74d5f6bc`).
+  if (uiaClassicRequested()) return { ok: false, error: CLASSIC_NEEDS_NATIVE, via: "native" };
 
   // PowerShell fallback — use hwnd-based script when available (H3)
   const script = options?.hwnd !== undefined
@@ -1884,6 +1890,17 @@ export async function clickElement(
 function isNativeActTimeout(e: unknown): boolean {
   return e instanceof Error && /^UIA operation timed out after \d+ms$/.test(e.message);
 }
+
+/**
+ * Whether a native classic call that threw had reached the classic client: a timeout means it is
+ * still running there; "busy" and "unavailable" mean it never started.
+ */
+function classicCallReached(e: unknown): boolean {
+  return isNativeActTimeout(e);
+}
+
+/** What a classic act answers when the native engine is unavailable (no PowerShell road for it). */
+const CLASSIC_NEEDS_NATIVE = "The classic UI Automation client needs the native engine, which is unavailable";
 
 /** `src/uia/mod.rs::STOPPED_ANSWERING`, matched whole by `uia-route-failure.ts`. */
 const STOPPED_ANSWERING = "Window stopped answering during the act";
@@ -1910,6 +1927,7 @@ export async function setElementValue(
         ...(options?.hwnd !== undefined && { hwnd: options.hwnd.toString() }),
         ...(uiaClassicRequested() && { classic: true }),
       });
+      if (uiaClassicRequested()) markClassicUsed();
       // `via` on a failure only: item 16 weighs a "not found" by it, and a success has nothing to
       // weigh — V1 `set_element_value` spreads this object into its reply, and gains no field.
       // internal #216 — `focusedBy` as in `clickElement`. V1 `set_element_value` drops it from its reply.
@@ -1917,11 +1935,13 @@ export async function setElementValue(
     } catch (e) {
       // internal #216 — as in `clickElement`: no second write through PowerShell after a native one
       // ran past its 8 s.
+      if (uiaClassicRequested() && classicCallReached(e)) markClassicUsed();
       if (isNativeActTimeout(e)) return { ok: false, error: STOPPED_ANSWERING, via: "native" };
       if (uiaClassicRequested()) return { ok: false, error: e instanceof Error ? e.message : String(e), via: "native" };
       console.warn("[uia-bridge] Native uiaSetValue failed, falling back to PowerShell:", e);
     }
   }
+  if (uiaClassicRequested()) return { ok: false, error: CLASSIC_NEEDS_NATIVE, via: "native" };
 
   // PowerShell fallback — use hwnd-based script when available (H3)
   const script = options?.hwnd !== undefined

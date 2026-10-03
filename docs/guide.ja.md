@@ -311,8 +311,8 @@ V2 は、座標ベースのクリックをエンティティベースの操作�
 
 | ツール | 説明 |
 |---|---|
-| `desktop_discover` | ウィンドウまたはブラウザタブを観測し、インタラクティブなエンティティを返します。raw 座標は返しません。UIA（ネイティブ）、CDP（ブラウザ）、ターミナル、GPU ビジュアルレーンに対応。 |
-| `desktop_act` | `desktop_discover` が返したエンティティを操作します。実行前にリースを検証し、セマンティック diff（`entity_disappeared`、`modal_appeared`、`focus_shifted` など）を返します。`diffUnchecked` があるときは、そこに挙がった種類を diff は確かめていません。diff に無くても、起きなかったとは限りません。視覚のみの対象では、成功時に `roiCapture`（変化領域の PNG ＋ 次対象の lease なしプレビュー）を同梱でき、「結果確認」と「次対象探索」を 1 コールで完了できます（`returnCapture`: `on-change` 既定で変化時に付与 / `never` で抑止 / `always` で常時）。 |
+| `desktop_discover` | ウィンドウまたはブラウザタブを観測し、インタラクティブなエンティティを返します。raw 座標は返しません。UIA（ネイティブ）、CDP（ブラウザ）、ターミナル、GPU ビジュアルレーンに対応。`uiaClient: "classic"` で 2.0 の UI Automation クライアントで読みます（`desktop_act` を参照）。 |
+| `desktop_act` | `desktop_discover` が返したエンティティを操作します。実行前にリースを検証し、セマンティック diff（`entity_disappeared`、`modal_appeared`、`focus_shifted` など）を返します。`diffUnchecked` があるときは、そこに挙がった種類を diff は確かめていません。diff に無くても、起きなかったとは限りません。視覚のみの対象では、成功時に `roiCapture`（変化領域の PNG ＋ 次対象の lease なしプレビュー）を同梱でき、「結果確認」と「次対象探索」を 1 コールで完了できます（`returnCapture`: `on-change` 既定で変化時に付与 / `never` で抑止 / `always` で常時）。`uiaClient: "classic"` は、既定のクライアントで扱えない窓のために、2.0 の UI Automation クライアントで操作します。キーボードの焦点を動かします（後ろの窓が手前に出て、その間に打ったキーを取ることがあり、窓を閉じた後はユーザーがクリックするまでマウスや窓の切り替えが効かないことがあります）。忙しい窓は待ち続けます（呼び出しは 8 秒以内に返りますが、裏では動き続けます。終わるまでは次の `classic` を断り、その窓への操作は既定のクライアントでも焦点を動かしえます。返事の `uiaClient.stillRunning` がそれを言います）。クライアントは呼び出しが終わったときに手放します。 |
 
 ### クリック優先順位
 

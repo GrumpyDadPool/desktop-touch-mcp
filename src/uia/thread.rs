@@ -668,9 +668,18 @@ where
                 napi::Error::from_reason(format!("UIA operation timed out after {timeout_ms}ms"))
             }
             crossbeam_channel::RecvTimeoutError::Disconnected => {
+                // The task was dropped without running (the thread could not start COM): nothing holds
+                // the client, so the flag must not stay set (gate 2 on `74d5f6bc`).
+                CLASSIC_IN_USE.store(false, Ordering::SeqCst);
                 napi::Error::from_reason("The classic UI Automation thread is unavailable")
             }
         })?
+}
+
+/// Whether a classic call is still running — after a timeout, its client is still alive and still
+/// affects the windows it touched (`execute_classic_with_timeout`).
+pub(crate) fn classic_in_use() -> bool {
+    CLASSIC_IN_USE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn classic_sender() -> &'static Sender<ClassicTask> {

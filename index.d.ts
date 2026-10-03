@@ -445,6 +445,8 @@ export declare function uiaGetFocusedAndPoint(opts: { cursorX: number; cursorY: 
 export declare function uiaGetFocusedElement(): Promise<NativeUiaFocusInfo | null>
 /** ADR-036 H2 — whether the native UIA engine ran in this process, as the engine and the OS answer. */
 export declare function uiaEngineEvidence(): NativeUiaEvidence
+/** internal #216 — whether a `uiaClient: "classic"` call is still running on its thread. */
+export declare function uiaClassicInUse(): boolean
 
 export declare function uiaClickElement(opts: { windowTitle: string; name?: string; automationId?: string; controlType?: string; hwnd?: string; classic?: boolean }): Promise<NativeActionResult>
 export declare function uiaSetValue(opts: { windowTitle: string; value: string; name?: string; automationId?: string; hwnd?: string; classic?: boolean }): Promise<NativeActionResult>

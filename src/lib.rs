@@ -223,6 +223,14 @@ pub struct NativeUiaEvidence {
     pub uia_core_loaded: bool,
 }
 
+/// internal #216 — whether a `uiaClient: "classic"` call is still running on the classic client's
+/// thread (one that ran past its timeout is). Sync and cheap: one atomic load.
+#[cfg(windows)]
+#[napi]
+pub fn uia_classic_in_use() -> Result<bool> {
+    win32::safety::napi_safe_call("uia_classic_in_use", || Ok(uia::thread::classic_in_use()))
+}
+
 /// See [`NativeUiaEvidence`]. Sync and cheap: four atomic loads and one `GetModuleHandleW`.
 #[cfg(windows)]
 #[napi]

@@ -123,7 +123,7 @@ export function describeUiaRouteFailure(kind: UiaRouteFailure): string {
     case "target_not_answering":
       return "the window did not answer UI Automation for 7 seconds (it may be busy), so nothing was sent to it — wait and try again";
     case "classic_client_busy":
-      return "an earlier call through the classic client (uiaClient: \"classic\") is still running, so nothing was sent — wait and try again, or use the default client";
+      return "an earlier call through the classic client (uiaClient: \"classic\") is still running, so nothing was sent — wait until it finishes; until then, acts on the window it touched can move the keyboard focus even through the default client";
     case "target_stopped_answering":
       return "the window stopped answering UI Automation during the press or write (it may be busy); it may still take effect when the window answers — look at it before trying again, so it is not done twice";
   }

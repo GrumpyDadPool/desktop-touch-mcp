@@ -430,6 +430,8 @@ export interface NativeUia {
   ): Promise<Record<string, boolean>>;
   /** internal #227 — the selected tab of a Windows Terminal window, or null. */
   uiaGetSelectedTab?(hwnd: string): Promise<NativeSelectedTab | null>;
+  /** internal #216 — whether a classic call is still running (`uia-client-scope.ts`). */
+  uiaClassicInUse?(): boolean;
 }
 
 // ─── Visual GPU surface (ADR-005 Phase 4a/4b-1) ──────────────────────────────

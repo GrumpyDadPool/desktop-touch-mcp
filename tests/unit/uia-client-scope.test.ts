@@ -3,7 +3,7 @@
  * and the reply made through it says what that client costs.
  */
 import { describe, it, expect } from "vitest";
-import { withUiaClient, uiaClassicRequested, CLASSIC_NOTE } from "../../src/engine/uia-client-scope.js";
+import { withUiaClient, uiaClassicRequested, markClassicUsed, CLASSIC_NOTE, CLASSIC_NOTE_NOT_USED } from "../../src/engine/uia-client-scope.js";
 
 describe("the classic scope", () => {
   it("is on inside withUiaClient('classic') and off outside it, and for 'default' and undefined", async () => {
@@ -28,12 +28,19 @@ describe("the classic scope", () => {
 });
 
 describe("the reply made through the classic client", () => {
-  it("carries the note on its JSON; a default reply is left as it is", async () => {
+  it("says it came from the classic client only when a native call went there (gate 2 on 74d5f6bc)", async () => {
     const { withClassicNote } = await import("../../src/tools/desktop-register.js");
     const reply = { content: [{ type: "text" as const, text: JSON.stringify({ ok: true }) }] };
-    const classic = await withClassicNote("classic", async () => reply);
-    expect(JSON.parse((classic.content[0] as { text: string }).text)).toEqual({ ok: true, uiaClient: { client: "classic", note: CLASSIC_NOTE } });
+    const used = await withClassicNote("classic", async () => { markClassicUsed(); return reply; });
+    expect(JSON.parse((used.content[0] as { text: string }).text)).toEqual({ ok: true, uiaClient: { client: "classic", used: true, stillRunning: false, note: CLASSIC_NOTE } });
+    const unused = await withClassicNote("classic", async () => reply);
+    expect(JSON.parse((unused.content[0] as { text: string }).text)).toEqual({ ok: true, uiaClient: { client: "classic", used: false, note: CLASSIC_NOTE_NOT_USED } });
     expect(await withClassicNote(undefined, async () => reply)).toBe(reply);
+  });
+
+  it("marking outside a classic call does nothing", () => {
+    expect(() => markClassicUsed()).not.toThrow();
+    expect(uiaClassicRequested()).toBe(false);
   });
 
   it("leaves a reply that is not JSON as it is", async () => {

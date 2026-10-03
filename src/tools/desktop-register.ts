@@ -14,7 +14,8 @@
  *     (each hwnd/tabId/windowTitle has its own LeaseStore and generation counter).
  */
 
-import { withUiaClient, CLASSIC_NOTE, type UiaClient } from "../engine/uia-client-scope.js";
+import { runClassic, CLASSIC_NOTE, CLASSIC_NOTE_STILL_RUNNING, CLASSIC_NOTE_NOT_USED, type UiaClient } from "../engine/uia-client-scope.js";
+import { nativeUia } from "../engine/native-engine.js";
 import { z } from "zod";
 import {
   landingAdvice,
@@ -853,8 +854,9 @@ const uiaClientSchema = z.enum(["default", "classic"]).optional().describe(
   "cannot read or act on a window. While it acts it moves the keyboard focus: a window behind can come to " +
   "the front and take keys typed meanwhile, and after the window closes the foreground can be left on an " +
   "invisible window, where the mouse and window switching fail until the user clicks. It also waits as long " +
-  "as a busy window stays busy; the call still answers within 8 s, and further 'classic' calls are refused " +
-  "until it finishes. The client is released after each call.",
+  "as a busy window stays busy; the call still answers within 8 s, but it keeps running, and until it " +
+  "finishes further 'classic' calls are refused and acts on that window can move the focus even through the " +
+  "default client (the reply's uiaClient.stillRunning says so). The client is released when the call finishes.",
 );
 
 // Phase 4 (Codex PR #41 P1): exported so run_macro DSL can register
@@ -944,13 +946,20 @@ export const desktopDiscoverRawHandler = (input: unknown): Promise<ToolResult> =
  * of the handler's returns produced it; a reply that is not JSON is left as it is.
  */
 export async function withClassicNote(client: UiaClient | undefined, run: () => Promise<ToolResult>): Promise<ToolResult> {
-  const result = await withUiaClient(client, run);
-  if (client !== "classic") return result;
+  if (client !== "classic") return run();
+  const { result, used } = await runClassic(run);
+  // Only what the classic client answered is said to come from it, and a call of it that ran past its
+  // limit is said to be still running: while it is, the default client's acts on that window move the
+  // focus too (gate 2 and codex on `74d5f6bc`).
+  const stillRunning = used && (nativeUia?.uiaClassicInUse?.() ?? false);
+  const uiaClient = used
+    ? { client: "classic", used: true, stillRunning, note: stillRunning ? CLASSIC_NOTE_STILL_RUNNING : CLASSIC_NOTE }
+    : { client: "classic", used: false, note: CLASSIC_NOTE_NOT_USED };
   const [first, ...rest] = result.content;
   if (first?.type !== "text") return result;
   try {
     const body = JSON.parse(first.text) as Record<string, unknown>;
-    return { ...result, content: [{ type: "text" as const, text: JSON.stringify({ ...body, uiaClient: { client: "classic", note: CLASSIC_NOTE } }, null, 2) }, ...rest] };
+    return { ...result, content: [{ type: "text" as const, text: JSON.stringify({ ...body, uiaClient }, null, 2) }, ...rest] };
   } catch {
     return result;
   }
