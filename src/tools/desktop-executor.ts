@@ -2679,6 +2679,27 @@ export function createDesktopExecutor(
               `after the write, so this act does not report it written and tried nothing else. Re-run desktop_discover and check the field before writing again.`,
             );
           }
+          // internal #216 — a window that did not answer is not a rung either. The keyboard rung reads
+          // the focus of a thread that is not running and refuses with `other_control`, a reason
+          // that sends the caller to move the focus (win2, R18b/R21b: a 10 s hang, 7.0 s, then
+          // `keyboard_target_unsafe` / `other_control`). The window may answer in a moment, so this
+          // says so and writes nothing.
+          if (classifyUiaRouteFailure(uiaErr) === "target_not_answering") {
+            const why = describeUiaRouteFailure("target_not_answering");
+            if (aimHwnd !== undefined) {
+              // The reason the row writes is the one the act answers (the route grid counts only
+              // those); which failure it was goes in `routeFailure`, as the click road writes it. A
+              // write by title ends unrecorded, as the ladder's own end below does.
+              probeRefusal("uia_set_value", "aim_route_failed", aimHwnd, entity, { routeFailure: "target_not_answering", addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
+              throw new AimedRouteFailedError(
+                `UIA value route for "${entity.label ?? entity.entityId}" on window ${aimHwnd}: the window did not answer. Not typing it another way.`,
+                aimHwnd,
+                { cause: uiaErr },
+                `The UIA value route to window ${aimHwnd} failed for "${quotedLabel(entity)}" because ${why}.`,
+              );
+            }
+            throw new Error(`UIA value route for "${entity.label ?? entity.entityId}": ${why}`, { cause: uiaErr });
+          }
           // A dead aim is NOT short-circuited here, unlike in the click path. That rung addresses
           // the same handle (`keyboardTypeBg` looks the window up by hwnd and throws when the
           // enumeration does not hold it), so it cannot write into a different window — and a

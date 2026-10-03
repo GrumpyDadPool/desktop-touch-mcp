@@ -341,15 +341,27 @@ pub(crate) fn element_from_handle(
         let elem = ctx
             .automation
             .ElementFromHandle(handle)
-            .map_err(|_| napi::Error::from_reason(format!("Window not found by hwnd: {hwnd}")))?;
+            .map_err(|e| {
+                // internal #216 — a window that did not answer is not a window that is gone.
+                if super::is_timeout(&e) {
+                    napi::Error::from_reason(super::NOT_ANSWERING)
+                } else {
+                    napi::Error::from_reason(format!("Window not found by hwnd: {hwnd}"))
+                }
+            })?;
         // ADR-036 — the cache build is a SEPARATE failure, and it must not be called a window that
         // went away. `ElementFromHandle` refusing the handle means the window is not there; a
         // provider or RPC fault inside `BuildUpdatedCache` happens to a window that is perfectly
         // alive, and telling the caller it vanished sends it to re-discover instead of to retry
         // (PR 側 codex, P2 on #631). The `CACHE_BUILD_FAILED_PREFIX` is how the two arrive apart;
         // it is produced and consumed in this crate only, so no caller parses a backend's words.
-        elem.BuildUpdatedCache(&ctx.cache_request)
-            .map_err(|e| napi::Error::from_reason(format!("{CACHE_BUILD_FAILED_PREFIX}{e}")))
+        elem.BuildUpdatedCache(&ctx.cache_request).map_err(|e| {
+            if super::is_timeout(&e) {
+                napi::Error::from_reason(super::NOT_ANSWERING)
+            } else {
+                napi::Error::from_reason(format!("{CACHE_BUILD_FAILED_PREFIX}{e}"))
+            }
+        })
     }
 }
 

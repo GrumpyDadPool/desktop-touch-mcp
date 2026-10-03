@@ -92,7 +92,8 @@ pub fn insert_text(opts: InsertTextOptions) -> napi::Result<ActionResult> {
 /// to re-discover a window that is still there (PR 側 codex, P2 on #631). `tree.rs` marks that case,
 /// because only this crate produces and reads the mark.
 fn root_failure_code(hwnd: Option<&str>, reason: &str) -> Option<String> {
-    if hwnd.is_none() || reason.starts_with(CACHE_BUILD_FAILED_PREFIX) {
+    // internal #216 — nor is a window that did not answer in time (`mod.rs::NOT_ANSWERING`).
+    if hwnd.is_none() || reason.starts_with(CACHE_BUILD_FAILED_PREFIX) || reason == super::NOT_ANSWERING {
         return None;
     }
     Some("aim_window_gone".to_string())
@@ -195,12 +196,18 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
             Err(e) => Ok(ActionResult {
                 ok: false,
                 element: None,
-                error: Some(format!("{e}")),
+                error: Some(failure_text(&e)),
                 code: None,
                 focused_by: Some(focused_by.into()),
             }),
         }
     }
+}
+
+/// A pattern call's failure in words: the backend's own, except a timeout, which is this crate's
+/// (`mod.rs::NOT_ANSWERING`).
+fn failure_text(e: &windows::core::Error) -> String {
+    if super::is_timeout(e) { super::NOT_ANSWERING.to_string() } else { format!("{e}") }
 }
 
 fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<ActionResult> {
@@ -383,7 +390,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
             Err(e) => Ok(ActionResult {
                 ok: false,
                 element: None,
-                error: Some(format!("{e}")),
+                error: Some(failure_text(&e)),
                 code: None,
                 focused_by: Some(focused_by.into()),
             }),
@@ -603,19 +610,29 @@ fn find_among_descendants(
     let ct_lower = control_type.map(|c| c.to_lowercase());
 
     let mut stack: Vec<(IUIAutomationElement, u32)> = Vec::with_capacity(64);
+    // internal #216 — a step that timed out is not "no such element": without this, a window too busy
+    // to answer was reported as one that no longer holds the element.
+    let mut timed_out = false;
+    let mut step = |r: windows::core::Result<IUIAutomationElement>| match r {
+        Ok(e) => Some(e),
+        Err(e) => {
+            timed_out |= super::is_timeout(&e);
+            None
+        }
+    };
 
-    if let Ok(child) = unsafe {
+    if let Some(child) = step(unsafe {
         ctx.walker
             .GetFirstChildElementBuildCache(window, &ctx.cache_request)
-    } {
+    }) {
         stack.push((child, 1));
     }
 
     while let Some((elem, depth)) = stack.pop() {
-        if let Ok(sib) = unsafe {
+        if let Some(sib) = step(unsafe {
             ctx.walker
                 .GetNextSiblingElementBuildCache(&elem, &ctx.cache_request)
-        } {
+        }) {
             stack.push((sib, depth));
         }
 
@@ -624,15 +641,18 @@ fn find_among_descendants(
         }
 
         if depth < MAX_SEARCH_DEPTH
-            && let Ok(child) = unsafe {
+            && let Some(child) = step(unsafe {
                 ctx.walker
                     .GetFirstChildElementBuildCache(&elem, &ctx.cache_request)
-            }
+            })
         {
             stack.push((child, depth + 1));
         }
     }
 
+    if timed_out {
+        return Err(napi::Error::from_reason(super::NOT_ANSWERING));
+    }
     Err(napi::Error::from_reason("Element not found"))
 }
 

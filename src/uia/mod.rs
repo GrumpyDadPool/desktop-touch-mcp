@@ -23,6 +23,19 @@ pub(crate) mod vdesktop;
 
 use windows::Win32::UI::Accessibility::*;
 
+/// internal #216 — what every road answers when UI Automation gave up waiting for the window's
+/// provider (`UIA_E_TIMEOUT`), in words this crate owns so the TS side matches them whole
+/// (`uia-route-failure.ts`). MEASURED win2 2026-10-03 (R18b, R21b): on the act client, a window
+/// whose UI thread is stuck longer than its `ConnectionTimeout` failed there, and the answer reached
+/// the caller as "the focus is on a different control" (the value road fell to the keyboard rung)
+/// — a wrong reason. A handle road must not call it a window that went away either.
+pub(crate) const NOT_ANSWERING: &str = "Window is not answering";
+
+/// Whether a UI Automation call failed because the provider did not answer in time.
+pub(crate) fn is_timeout(e: &windows::core::Error) -> bool {
+    e.code().0 as u32 == UIA_E_TIMEOUT
+}
+
 /// internal #216 — the control type the act client's element search matches against: the type UI
 /// Automation answers, except that a `Document` that is a window of its own and takes a value is the
 /// `Edit` the read client reports.

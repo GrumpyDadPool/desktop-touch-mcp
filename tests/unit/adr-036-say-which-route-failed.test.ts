@@ -34,6 +34,9 @@ const MEASURED: Array<[string, string]> = [
   // Internal #188 — the native writer's own words, written after it reads `ValuePattern.IsReadOnly`,
   // because SetValue's error on that road is localized.
   ["Value is read-only", "element_read_only"],
+  // internal #216 — the native engine's words for `UIA_E_TIMEOUT` (win2 R18b/R21b: a window whose
+  // UI thread was stuck past the act client's connection timeout).
+  ["Window is not answering", "target_not_answering"],
 ];
 
 describe("the classifier knows the answers the backend gave, and only those", () => {

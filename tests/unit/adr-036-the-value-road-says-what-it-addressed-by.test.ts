@@ -97,6 +97,30 @@ async function typeInto(entity: UiEntity, aim: Aim) {
 
 const aimed: Aim = { kind: "aim", title: "VR-CELL", hwnd: HWND };
 
+describe("a window that did not answer is refused, not typed into another way (internal #216)", () => {
+  const notAnswering = () => vi.fn(async () => { throw Object.assign(new Error("Window is not answering"), { uiaVia: "native" }); });
+  const entity: UiEntity = { ...base, label: "DELTA", locator: { uia: { name: "DELTA" } } };
+
+  it("on an aimed write: aim_route_failed in the engine's words, and the keyboard rung is never asked", async () => {
+    const keyboardTypeBg = vi.fn(async () => {});
+    const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+    const err = await createDesktopExecutor(aimed, { ...deps(), uiaSetValue: notAnswering(), keyboardTypeBg })(entity, "type", "PROBE-VR")
+      .then(() => null, (e: unknown) => e as Error & { callerDetail?: string });
+    expect(err?.name).toBe("AimedRouteFailedError");
+    expect(err?.callerDetail).toContain("did not answer UI Automation");
+    expect(keyboardTypeBg).not.toHaveBeenCalled();
+  });
+
+  it("on a write by title: an error that says so, and the keyboard rung is never asked", async () => {
+    const keyboardTypeBg = vi.fn(async () => {});
+    const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+    const err = await createDesktopExecutor({ kind: "aim", title: "VR-CELL" }, { ...deps(), uiaSetValue: notAnswering(), keyboardTypeBg })(entity, "type", "PROBE-VR")
+      .then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toContain("did not answer UI Automation");
+    expect(keyboardTypeBg).not.toHaveBeenCalled();
+  });
+});
+
 describe("the UIA value road, on success", () => {
   it("records how the focus was moved into the field, and null when the backend does not say (internal #216)", async () => {
     const entity: UiEntity = { ...base, label: "DELTA", locator: { uia: { name: "DELTA" } } };

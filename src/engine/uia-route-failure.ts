@@ -66,7 +66,8 @@ export type UiaRouteFailure =
   | "element_not_found"
   | "pattern_not_supported"
   | "element_disabled"
-  | "element_read_only";
+  | "element_read_only"
+  | "target_not_answering";
 
 /** Written by the bridge itself (script and native), so they arrive as the whole message. */
 const WHOLE: ReadonlyMap<string, UiaRouteFailure> = new Map([
@@ -77,6 +78,10 @@ const WHOLE: ReadonlyMap<string, UiaRouteFailure> = new Map([
   // Internal #188 — the native writer reads `ValuePattern.IsReadOnly` and says so in these words
   // before calling SetValue, whose own error is localized and cannot be matched.
   ["Value is read-only", "element_read_only"],
+  // internal #216 — the native engine's words for a UI Automation timeout (`UIA_E_TIMEOUT`): the
+  // window's provider did not answer within the act client's connection timeout (7 s), on whatever
+  // step it happened (`src/uia/mod.rs::NOT_ANSWERING`).
+  ["Window is not answering", "target_not_answering"],
 ]);
 
 /** .NET's text inside PowerShell's method-invocation wrapper — the wrapper names the method. */
@@ -106,5 +111,7 @@ export function describeUiaRouteFailure(kind: UiaRouteFailure): string {
       return "the element the route matched is disabled";
     case "element_read_only":
       return "the element the route matched is read-only";
+    case "target_not_answering":
+      return "the window did not answer UI Automation for 7 seconds (it may be busy); nothing was written or pressed — wait and try again";
   }
 }
