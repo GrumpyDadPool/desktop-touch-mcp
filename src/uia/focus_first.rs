@@ -16,9 +16,18 @@
 //!   application's model when the focus left the field (the step that focuses the button).
 //! - **A list item, inside a list that has a window of its own**: the same, on the list's window;
 //!   then the item is invoked. 0/3 falls (the default client 3/3).
-//! - **Anything else** (WPF, Chromium — no window of their own): UI Automation's own `SetFocus`.
-//!   No fall and the value committed, but with the window behind it takes the foreground, and most
-//!   keys typed meanwhile go to that window (153–183 of 200) — as the default client does there.
+//! - **WPF and Chromium** (no window of their own): UI Automation's own `SetFocus`. No fall and the
+//!   value committed, but with the window behind it takes the foreground, and most keys typed
+//!   meanwhile go to that window (153–183 of 200) — as the default client does there.
+//! - **Anything else is left where it is** (`"skipped"`): a Win32 or WinForms element with no window
+//!   of its own (a toolbar or ToolStrip button, a tree item, a tab, a grid cell, a menu item), and
+//!   every framework not measured. UI Automation's `SetFocus` is the very call that raised the fall
+//!   (`thread.rs`: `SetFocus` alone, 3/3), and on those elements it would aim at the container's
+//!   window, a child — the shape that falls. Leaving it is what the client did with `AutoSetFocus`
+//!   off and nothing else (no fall); a value a field holds is then committed only if the press itself
+//!   commits it, as for a person clicking a ToolStrip button (gate 2 on `0eccd63c`).
+//! - A window that is a top-level or a popup (a dialog's own root, a combo box's drop-down list) is
+//!   not given Win32 `SetFocus`, which would activate it — R17 measured child controls only.
 //!
 //! What this does not cover (same rounds): a Win32 menu item with a submenu still falls (menu mode,
 //! not focus); and a ListBox item written with `Select` or a ComboBox written with `SetValue` never
@@ -27,9 +36,10 @@
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowThreadProcessId, IsHungAppWindow, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL,
+    GA_ROOT, GetAncestor, GetWindowThreadProcessId, IsHungAppWindow, SMTO_ABORTIFHUNG,
+    SendMessageTimeoutW, WM_NULL,
 };
 
 use super::thread::UiaContext;
@@ -48,7 +58,13 @@ pub(crate) const BY_LIST_WINDOW: &str = "win32_list";
 pub(crate) const BY_UIA: &str = "uia";
 pub(crate) const ALREADY: &str = "already";
 pub(crate) const NOT_ANSWERING: &str = "not_answering";
+pub(crate) const SKIPPED: &str = "skipped";
+pub(crate) const ATTACH_FAILED: &str = "attach_failed";
 pub(crate) const FAILED: &str = "failed";
+
+/// The frameworks whose windowless elements R17 measured with UI Automation's own `SetFocus`
+/// (`UIA_FrameworkIdPropertyId`: WPF's controls, Chromium's page in Chrome and Edge).
+const UIA_FOCUS_MEASURED: [&str; 2] = ["WPF", "Chrome"];
 
 /// Move the keyboard focus to `elem` (or to the list that holds it), and say how.
 ///
@@ -59,11 +75,15 @@ pub(crate) fn move_focus_first(ctx: &UiaContext, elem: &IUIAutomationElement) ->
         if elem.CurrentHasKeyboardFocus().map(|b| b == true).unwrap_or(false) {
             return ALREADY;
         }
-        if let Some(own) = own_window(elem) {
+        if let Some(own) = own_window(elem).filter(|h| is_child(*h)) {
             return win32_focus(own, BY_WIN32);
         }
-        if let Some(list) = list_window_of_item(ctx, elem) {
+        if let Some(list) = list_window_of_item(ctx, elem).filter(|h| is_child(*h)) {
             return win32_focus(list, BY_LIST_WINDOW);
+        }
+        let framework = elem.CurrentFrameworkId().map(|b| b.to_string()).unwrap_or_default();
+        if !UIA_FOCUS_MEASURED.contains(&framework.as_str()) {
+            return SKIPPED;
         }
         match elem.SetFocus() {
             Ok(()) => BY_UIA,
@@ -77,6 +97,11 @@ pub(crate) fn move_focus_first(ctx: &UiaContext, elem: &IUIAutomationElement) ->
 unsafe fn own_window(elem: &IUIAutomationElement) -> Option<HWND> {
     let h = unsafe { elem.CurrentNativeWindowHandle() }.ok()?;
     (!h.0.is_null()).then_some(HWND(h.0))
+}
+
+/// A window inside another — not a top-level and not a popup, whose `GA_ROOT` is itself.
+unsafe fn is_child(hwnd: HWND) -> bool {
+    unsafe { GetAncestor(hwnd, GA_ROOT) }.0 != hwnd.0
 }
 
 /// A list item's list, when the list has a window of its own — the shape R17c measured (a WinForms
@@ -112,9 +137,17 @@ unsafe fn win32_focus(hwnd: HWND, by: &'static str) -> &'static str {
         if theirs == 0 {
             return FAILED;
         }
-        let attached = theirs != mine && AttachThreadInput(mine, theirs, true).as_bool();
-        let focused = SetFocus(Some(hwnd)).is_ok();
-        if attached {
+        let attached = theirs == mine || AttachThreadInput(mine, theirs, true).as_bool();
+        if !attached {
+            return ATTACH_FAILED;
+        }
+        // Judged by where the focus is afterwards, read while the queues are still shared — not by
+        // `SetFocus`'s return. That returns the window that HAD the focus, and windows-rs turns a
+        // null into `Err`: a window behind usually had none, so a move that worked read as failed
+        // (gate 2 on `0eccd63c`).
+        let _ = SetFocus(Some(hwnd));
+        let focused = GetFocus().0 == hwnd.0;
+        if theirs != mine {
             let _ = AttachThreadInput(mine, theirs, false);
         }
         if focused { by } else { FAILED }

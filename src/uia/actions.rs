@@ -329,15 +329,17 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 .CurrentControlType()
                 .map(|t| write_is_checked(t.0))
                 .unwrap_or(false);
+        // Internal #216 — into the field before writing, as a person would, by a road that does not
+        // raise the fall (`focus_first.rs`); the press that follows takes it away again, which is
+        // when the application commits the value. Before `before` is read: a field that reformats
+        // its text on taking the focus would otherwise read as moved by a write that took nothing
+        // (gate 2 on `0eccd63c`).
+        let focused_by = super::focus_first::move_focus_first(ctx, &elem);
         let before = if checked {
             vp.CurrentValue().ok().map(|b| b.to_string())
         } else {
             None
         };
-        // Internal #216 — into the field before writing, as a person would, by a road that does not
-        // raise the fall (`focus_first.rs`); the press that follows takes it away again, which is
-        // when the application commits the value.
-        let focused_by = super::focus_first::move_focus_first(ctx, &elem);
         let bstr = windows::core::BSTR::from(&*opts.value);
         match vp.SetValue(&bstr) {
             Ok(()) => {
