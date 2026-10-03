@@ -102,8 +102,9 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
   `desktop_act(type)` posts the characters at Word's caret, in front or behind. The reply says the
   landing could not be confirmed, AutoCorrect applies, and `setValue` is refused (select, then type).
   Nothing is typed while a dialog is open over Word or when its document window changed since the
-  read. **Known limitation:** once, just after Word opened, only the first ten characters of a type
-  arrived and later types none, with `ok: true` (not reproduced in 18 later tries; cause unknown).
+  read. **Known limitation:** just after Word opened, a type can deliver only its first ten
+  characters and still answer `ok: true` (seen twice; typing into Word left behind about a second
+  after it opened, 1 time in 6; not seen in 23 other tries; cause unknown).
   The page text is read back after each type: if it did not change at all, the act fails
   `value_not_applied` (a type that landed out of view can fail this way too), but a type cut short
   still answers `ok: true` — check the document.
