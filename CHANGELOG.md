@@ -18,8 +18,8 @@ Read: a default `desktop_discover`, elements read / time. Measured on one Window
 |---|---|---|
 | Chrome page | blind (6 elements, OCR) / 387 ms | the page's controls (45) / 186 ms |
 | VS Code | blind (6, OCR) / 389 ms | 128 elements / 201 ms |
-| Edge | blind (7, OCR) / 451 ms | 62–78 elements / 210 ms |
-| Long pages (Wikipedia, GitHub, NHK) | blind, OCR / 424–516 ms | 53–185 elements / 171–271 ms |
+| Edge | blind (7, OCR) / 451 ms | 59–78 elements / 210 ms |
+| Long pages (Wikipedia, GitHub, NHK) | blind, OCR / 424–516 ms | 53–185 elements / 171–273 ms |
 | Explorer | the item count missing (45) / 135 ms | included (111) / 290 ms |
 | Settings (About) | the device's values missing (20) / 86 ms | included (73) / 203 ms |
 | Word | the body not listed | each visible page's body, as a `textbox` |
@@ -74,7 +74,7 @@ turns that off and moves the focus itself, by roads that do not take the foregro
 | A window that repaints itself (a console cursor, some WinForms and Java windows) | — | `motion: "indeterminate"`, `selfRepainting: true` when seen repainting twice, 300 ms or more apart, since the last discover or act (`observation.watchedBeforeMs`) |
 | Rich narration, a value shown in a name (a calculator's display, an item count) | one element gone, another appeared | `post.rich.nameDeltas` (`type`, `before`, `after`; up to 3; a control replaced by one of another type is reported as gone and appeared) |
 | Rich narration, a window the act retitled (typing in Notepad, opening a folder in Explorer) | `timeout` | the diff, read by the window's handle |
-| `desktop_discover` after a change made outside `desktop_act` (another program, COM, an Alt-Tab) | the previous read, up to 30 s old | read again on every call (22–25 ms for Notepad) |
+| `desktop_discover` after a change made outside `desktop_act` (another program, COM, an Alt-Tab) | the previous read, up to 30 s old | read again on every call (22–30 ms for Notepad) |
 
 The screen's changed regions do not say which window drew them, so another window repainting over
 the target, or the target's own activation, still counts as a change. Rich narration withholds a diff
