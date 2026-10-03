@@ -367,7 +367,8 @@ fn set_value_impl(
         // its write usually fails, and the move would leave the focus on a control the act then
         // refused. win2 measured that on a WPF read-only ComboBox (2.1.0 dogfood, §9 r1b, 3/3: the
         // focus left DELTA for the combo and stayed; the build before the move left it alone). Such
-        // an element is written first, and the focus moves only after a write that read back as taken.
+        // an element is written first, and the focus moves only after a write not read back as refused
+        // (where the value cannot be read back, nothing refuses it).
         // The classic client moves the focus by itself on the write, so it is not deferred there.
         let move_first = !said_read_only || ctx.classic;
         let mut focused_by = if move_first {
@@ -408,7 +409,8 @@ fn set_value_impl(
                 // write itself took long: the caller may already have been told the window stopped
                 // answering, and a focus move landing later would surprise it (gate 2 on `f2e3b75f`).
                 // Measured on the caller's clock, from when the task was queued (gate 1 on
-                // `f4f1af62`), with room left for the move itself.
+                // `f4f1af62`), with room left for the move itself. Not bounded: a move into a window that
+                // hangs right then can still land past the limit (UIA connection timeout, 7 s).
                 if !move_first
                     && submitted.elapsed()
                         < std::time::Duration::from_millis(u64::from(

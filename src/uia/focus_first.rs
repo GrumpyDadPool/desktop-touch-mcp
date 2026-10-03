@@ -77,7 +77,8 @@ pub(crate) const SKIPPED: &str = "skipped";
 pub(crate) const KEPT_BEHIND: &str = "kept_behind";
 pub(crate) const BY_LEGACY_TAKEFOCUS: &str = "legacy_takefocus";
 pub(crate) const BY_CLASSIC: &str = "classic";
-/// A write to an element that says read-only, refused before the focus was moved (`actions.rs`).
+/// The focus was not moved for an element that says read-only: its write was refused, or the write
+/// took too long to move it after (`actions.rs`).
 pub(crate) const NOT_MOVED_READ_ONLY: &str = "not_moved_read_only";
 pub(crate) const ATTACH_FAILED: &str = "attach_failed";
 pub(crate) const FAILED: &str = "failed";
