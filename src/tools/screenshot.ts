@@ -5,7 +5,7 @@ import type { CaptureSource, CaptureFallbackReason } from "../engine/image.js";
 import { captureAndDiff, captureAllLayers, hasBuffer } from "../engine/layer-buffer.js";
 import type { WindowInfo } from "../engine/layer-buffer.js";
 import { getWindows } from "../engine/nutjs.js";
-import { enumMonitors, getVirtualScreen, getWindowTitleW, enumWindowsInZOrder } from "../engine/win32.js";
+import { enumMonitors, getVirtualScreen, getWindowTitleW, getWindowRectByHwnd, enumWindowsInZOrder } from "../engine/win32.js";
 import { getUiElements, extractActionableElements, WINUI3_CLASS_RE, detectUiaBlind } from "../engine/uia-bridge.js";
 import type { UiElementsResult } from "../engine/uia-bridge.js";
 import { recognizeWindow, ocrWordsToActionable, runOcr, mergeNearbyWords, runSomPipeline, snapToDictionary, detectOcrLanguage } from "../engine/ocr-bridge.js";
@@ -81,6 +81,8 @@ export const screenshotSchema = {
     .describe(
       "1:1 pixel mode — no scaling, WebP compression. " +
       "Window captures include 'origin: (x,y)' so you can compute screen position: screen_x = origin_x + image_x. " +
+      "Except mode='background' when the frame comes from the window's composition surface (WGC, used when it can be for a visible, non-minimised window with fullContent): " +
+      "it starts at the window's visible frame, which is not measured, so no origin is given — the text says so; use desktop_discover for coordinates. " +
       "When dotByDotMaxDimension is also set, scale factor is included: screen_x = origin_x + image_x / scale."
     ),
   dotByDotMaxDimension: z
@@ -135,7 +137,7 @@ export const screenshotSchema = {
     .describe(
       "Capture mode.\n" +
       "  'normal'     — default. Window-targeted captures (windowTitle / hwnd) use Win32 PrintWindow with automatic BitBlt fallback when PrintWindow returns no data or an all-black frame; the route used is reported in hints.captureSource. Fullscreen / displayId captures use BitBlt.\n" +
-      "  'background' — explicit Win32 PrintWindow capture, retained for back-compat and explicit selection. Requires windowTitle (or hwnd). Pair with fullContent for GPU-rendered apps."
+      "  'background' — a capture of the window itself, not of the screen: its composition surface (WGC) when it can be for a visible, non-minimised window with fullContent, else Win32 PrintWindow. Requires windowTitle (or hwnd). Pair with fullContent for GPU-rendered apps."
     ),
   fullContent: coercedBoolean()
     .default(true)
@@ -1075,20 +1077,32 @@ export const screenshotBgHandler = async ({
     const effectiveTitle = resolvedWin?.title ?? windowTitle;
     const bgWarnings: string[] = [...(resolvedWin?.warnings ?? [])];
 
-    const windows = await getWindows();
-    let hwnd: unknown = null;
+    let hwnd: bigint | null = null;
     let foundTitle = "";
     let windowScreenRegion: { x: number; y: number; width: number; height: number } | null = null;
 
-    for (const win of windows) {
-      const h = (win as unknown as { windowHandle: unknown }).windowHandle;
-      const title = h ? getWindowTitleW(h) : await win.title;
-      if (title.toLowerCase().includes(effectiveTitle.toLowerCase())) {
-        hwnd = h;
-        foundTitle = title;
-        const reg = await win.region;
-        windowScreenRegion = { x: reg.left, y: reg.top, width: reg.width, height: reg.height };
-        break;
+    // Internal #243: a window resolved above (by hwnd, @active or a dialog rescue) is the one
+    // captured, without matching its title again over nut-js's list, where another window with the
+    // same text could come first. A plain title that matches a top-level window resolves to null and
+    // is still matched here. That loop handed nut-js's handle — a number — to natives that take a
+    // BigInt, which threw with an empty message, so every background capture failed as
+    // "screenshot failed: " (win2, 2026-10-04, since at least 1.16.0); it is a BigInt first now.
+    if (resolvedWin) {
+      hwnd = resolvedWin.hwnd;
+      foundTitle = resolvedWin.title;
+      windowScreenRegion = getWindowRectByHwnd(hwnd);
+    } else {
+      for (const win of await getWindows()) {
+        const raw = (win as unknown as { windowHandle: unknown }).windowHandle;
+        const h = typeof raw === "number" || typeof raw === "bigint" ? BigInt(raw) : null;
+        const title = h ? getWindowTitleW(h) : await win.title;
+        if (title.toLowerCase().includes(effectiveTitle.toLowerCase())) {
+          hwnd = h;
+          foundTitle = title;
+          const reg = await win.region;
+          windowScreenRegion = { x: reg.left, y: reg.top, width: reg.width, height: reg.height };
+          break;
+        }
       }
     }
 
@@ -1119,7 +1133,23 @@ export const screenshotBgHandler = async ({
     const result = await captureWindowBackground(hwnd, captureOpts, pwFlags);
 
     let dimensionText: string;
-    if (dotByDot && windowScreenRegion) {
+    // A WGC frame starts at the window's visible (DWM) frame, not at GetWindowRect's corner, which
+    // includes the invisible resize border: win2 measured the image 7 px right of that corner
+    // (2026-10-04, internal #243), so an origin from the rect would put a click 7 px left. Until the
+    // visible frame is read, a WGC frame gets no origin; PrintWindow renders the whole rect.
+    const visibleFrameOnly = result.source === "wgc";
+    let originPrinted = false;
+    if (dotByDot && visibleFrameOnly) {
+      dimensionText =
+        `Background capture (dot-by-dot) of "${foundTitle}": ${result.width}x${result.height}px` +
+        (result.scale !== undefined ? ` | scale: ${result.scale.toFixed(4)}` : "") +
+        " | no screen origin: this image starts at the window's visible frame, which this capture does not measure." +
+        " For screen coordinates use desktop_discover." +
+        (region
+          ? ` [sub-crop applied: (${region.x},${region.y}) ${region.width}x${region.height}, relative to the visible frame]`
+          : "");
+    } else if (dotByDot && windowScreenRegion) {
+      originPrinted = true;
       // Compute screen-space origin: window position + region offset (approximate, ignores DPI scale)
       const regionOffsetX = region ? region.x : 0;
       const regionOffsetY = region ? region.y : 0;
@@ -1148,6 +1178,14 @@ export const screenshotBgHandler = async ({
       height: result.height,
       wantInline: true,
       meta: { tag: foundTitle || effectiveTitle },
+      // The default description says the text carries click coordinates; only the branch that
+      // prints an origin does (win2 on 9ca8f5a4, internal #243; gate 2 on 2bee92aa).
+      ...(!originPrinted && {
+        describe: (info: { width: number; height: number; mimeType: string; bytes: number }) =>
+          `Screenshot ${info.width}×${info.height} (${info.mimeType}, ${info.bytes} bytes). ` +
+          "Open this resource only if you need to inspect the pixels again. This capture gives no " +
+          "screen origin for clicking — use desktop_discover for coordinates.",
+      }),
     });
     const allBgWarnings = warning ? [...bgWarnings, warning] : [...bgWarnings];
     // ADR-027 R9/AC8 — captureBlocked means no capture rung produced non-black
@@ -1359,8 +1397,8 @@ export function registerScreenshotTools(server: McpServer): void {
         "detail='som' returns OCR-detected elements with IDs plus a Set-of-Marks annotated image delivered by-ref by default (bypasses UIA entirely). " +
         "detail='ocr' returns Windows OCR words with screen-pixel clickAt coords (Phase 4: absorbs former screenshot_ocr — use when UIA is sparse and you want to force OCR unconditionally). " +
         "detail='image' and detail='som' both return a cheap by-ref resource_link by default (no inline base64); pass confirmImage=true to also embed the inline image (the annotated bitmap for som). " +
-        "mode='background' captures hidden/minimised/occluded windows via PrintWindow (Phase 4: absorbs former screenshot_background) — pair with windowTitle/hwnd. " +
-        "dotByDot=true returns 1:1 pixel WebP; compute screen coords: screen_x = origin_x + image_x (or screen_x = origin_x + image_x / scale when dotByDotMaxDimension is set — scale printed in response). " +
+        "mode='background' captures the window itself, hidden/minimised/occluded too — from its composition surface (WGC) when it can, else via PrintWindow (Phase 4: absorbs former screenshot_background) — pair with windowTitle/hwnd. " +
+        "dotByDot=true returns 1:1 pixel WebP; compute screen coords: screen_x = origin_x + image_x (or screen_x = origin_x + image_x / scale when dotByDotMaxDimension is set — scale printed in response); a background WGC frame prints no origin. " +
         "diffMode=true returns only changed windows after the first call (~160 tok). " +
         "region={x,y,width,height} captures a sub-rectangle (Phase 4: absorbs former scope_element when paired with windowTitle/hwnd — discover element bounds via desktop_discover, then pass region here). " +
         "Data reduction: grayscale=true (−50%), dotByDotMaxDimension=1280 (caps longest edge), windowTitle+region (sub-crop to exclude browser chrome — e.g. region={x:0, y:120, width:1920, height:900}).",
