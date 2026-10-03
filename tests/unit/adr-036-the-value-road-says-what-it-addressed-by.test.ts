@@ -111,13 +111,23 @@ describe("a window that did not answer is refused, not typed into another way (i
     expect(keyboardTypeBg).not.toHaveBeenCalled();
   });
 
-  it("on a write by title: an error that says so, and the keyboard rung is never asked", async () => {
+  it("on a write by title: the same refusal, and the keyboard rung is never asked", async () => {
     const keyboardTypeBg = vi.fn(async () => {});
     const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
     const err = await createDesktopExecutor({ kind: "aim", title: "VR-CELL" }, { ...deps(), uiaSetValue: notAnswering(), keyboardTypeBg })(entity, "type", "PROBE-VR")
-      .then(() => null, (e: unknown) => e as Error);
-    expect(err?.message).toContain("did not answer UI Automation");
+      .then(() => null, (e: unknown) => e as Error & { callerDetail?: string });
+    expect(err?.name).toBe("AimedRouteFailedError");
+    expect(err?.callerDetail).toContain("did not answer UI Automation");
     expect(keyboardTypeBg).not.toHaveBeenCalled();
+  });
+
+  it("a write that stopped answering midway says it may still land, not that nothing was done (gate 2 on fb2db897)", async () => {
+    const stopped = vi.fn(async () => { throw Object.assign(new Error("Window stopped answering during the act"), { uiaVia: "native" }); });
+    const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+    const err = await createDesktopExecutor(aimed, { ...deps(), uiaSetValue: stopped })(entity, "type", "PROBE-VR")
+      .then(() => null, (e: unknown) => e as Error & { callerDetail?: string });
+    expect(err?.callerDetail).toContain("may still take effect");
+    expect(err?.callerDetail).not.toContain("nothing was sent");
   });
 });
 
@@ -338,6 +348,15 @@ describe("the UIA click road, and its refusals and downgrade", () => {
     expect(allRows().find((r) => r.why === "uia_invoke")).toMatchObject({ route: "uia", focusedBy: "win32" });
     await click({ ...button, locator: { uia: { name: "GO" } } }, aimed, { uiaClick: vi.fn(async () => undefined) });
     expect(allRows().filter((r) => r.why === "uia_invoke").at(-1)?.focusedBy).toBeNull();
+  });
+
+  it("does not press a window that did not answer by its remembered point, on the title road (gate 2 on fb2db897)", async () => {
+    for (const text of ["Window is not answering", "Window stopped answering during the act"]) {
+      const d = { uiaClick: failing(text), mouseClick: vi.fn(async () => {}) };
+      const err = await click({ ...button, locator: { uia: { name: "GO" } } }, { kind: "aim", title: "VR-CELL" }, d);
+      expect((err as Error).name).toBe("AimedRouteFailedError");
+      expect(d.mouseClick).not.toHaveBeenCalled();
+    }
   });
 
   it("writes the axes on a UIA invoke by title and name", async () => {

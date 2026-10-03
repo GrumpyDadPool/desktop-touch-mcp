@@ -537,6 +537,8 @@ unsafe fn configure_cache_properties(cr: &IUIAutomationCacheRequest) -> windows:
         cr.AddProperty(UIA_IsOffscreenPropertyId)?;
         cr.AddProperty(UIA_ClassNamePropertyId)?;
         cr.AddProperty(UIA_NativeWindowHandlePropertyId)?;
+        // internal #216 — `mod.rs::cached_control_type` reads it with the value pattern.
+        cr.AddProperty(UIA_ValueIsReadOnlyPropertyId)?;
 
         cr.AddPattern(UIA_InvokePatternId)?;
         cr.AddPattern(UIA_ValuePatternId)?;

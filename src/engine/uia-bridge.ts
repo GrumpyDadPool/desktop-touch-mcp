@@ -1855,6 +1855,9 @@ export async function clickElement(
         ...(result.focusedBy ? { focusedBy: result.focusedBy } : {}),
       };
     } catch (e) {
+      // internal #216 — the act ran past its 8 s. The press may already be with the window, so the
+      // PowerShell road below would be a second press (gate 2 on `fb2db897`).
+      if (isNativeActTimeout(e)) return { ok: false, error: STOPPED_ANSWERING, via: "native" };
       console.warn("[uia-bridge] Native uiaClickElement failed, falling back to PowerShell:", e);
     }
   }
@@ -1867,6 +1870,14 @@ export async function clickElement(
   // Which client answered — ADR-036 item 16 weighs a "not found" by it (see `UiElementsResult.via`).
   return { ...JSON.parse(output), via: "powershell" };
 }
+
+/** The native engine's words for an act that ran past its 8 s (`src/uia/thread.rs::run_with_timeout`). */
+function isNativeActTimeout(e: unknown): boolean {
+  return e instanceof Error && /^UIA operation timed out after \d+ms$/.test(e.message);
+}
+
+/** `src/uia/mod.rs::STOPPED_ANSWERING`, matched whole by `uia-route-failure.ts`. */
+const STOPPED_ANSWERING = "Window stopped answering during the act";
 
 export async function setElementValue(
   windowTitle: string,
@@ -1894,6 +1905,9 @@ export async function setElementValue(
       // internal #216 — `focusedBy` as in `clickElement`. V1 `set_element_value` drops it from its reply.
       return { ok: result.ok, error: result.error ?? undefined, code: result.code ?? undefined, ...(!result.ok && { via: "native" as const }), ...(result.focusedBy ? { focusedBy: result.focusedBy } : {}) };
     } catch (e) {
+      // internal #216 — as in `clickElement`: no second write through PowerShell after a native one
+      // ran past its 8 s.
+      if (isNativeActTimeout(e)) return { ok: false, error: STOPPED_ANSWERING, via: "native" };
       console.warn("[uia-bridge] Native uiaSetValue failed, falling back to PowerShell:", e);
     }
   }

@@ -205,9 +205,9 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
 }
 
 /// A pattern call's failure in words: the backend's own, except a timeout, which is this crate's
-/// (`mod.rs::NOT_ANSWERING`).
+/// (`mod.rs::STOPPED_ANSWERING`: the press or write may still run when the window answers).
 fn failure_text(e: &windows::core::Error) -> String {
-    if super::is_timeout(e) { super::NOT_ANSWERING.to_string() } else { format!("{e}") }
+    if super::is_timeout(e) { super::STOPPED_ANSWERING.to_string() } else { format!("{e}") }
 }
 
 fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<ActionResult> {
@@ -612,11 +612,13 @@ fn find_among_descendants(
     let mut stack: Vec<(IUIAutomationElement, u32)> = Vec::with_capacity(64);
     // internal #216 — a step that timed out is not "no such element": without this, a window too busy
     // to answer was reported as one that no longer holds the element.
-    let mut timed_out = false;
-    let mut step = |r: windows::core::Result<IUIAutomationElement>| match r {
+    let timed_out = std::cell::Cell::new(false);
+    let step = |r: windows::core::Result<IUIAutomationElement>| match r {
         Ok(e) => Some(e),
         Err(e) => {
-            timed_out |= super::is_timeout(&e);
+            if super::is_timeout(&e) {
+                timed_out.set(true);
+            }
             None
         }
     };
@@ -629,6 +631,10 @@ fn find_among_descendants(
     }
 
     while let Some((elem, depth)) = stack.pop() {
+        // A provider that did not answer once will cost the same wait on every further step: stop.
+        if timed_out.get() {
+            break;
+        }
         if let Some(sib) = step(unsafe {
             ctx.walker
                 .GetNextSiblingElementBuildCache(&elem, &ctx.cache_request)
@@ -650,7 +656,7 @@ fn find_among_descendants(
         }
     }
 
-    if timed_out {
+    if timed_out.get() {
         return Err(napi::Error::from_reason(super::NOT_ANSWERING));
     }
     Err(napi::Error::from_reason("Element not found"))

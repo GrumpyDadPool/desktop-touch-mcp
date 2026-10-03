@@ -370,24 +370,36 @@ pub(crate) fn element_from_handle(
 /// `aim_window_gone`.
 pub(crate) const CACHE_BUILD_FAILED_PREFIX: &str = "UIA cache build failed: ";
 
+/// `win_err`, except a UI Automation timeout, which is this crate's `NOT_ANSWERING` (internal #216).
+fn timeout_or_win_err(e: windows::core::Error) -> napi::Error {
+    if super::is_timeout(&e) { napi::Error::from_reason(super::NOT_ANSWERING) } else { win_err(e) }
+}
+
 /// Find a top-level window whose name contains `title` (case-insensitive substring match).
 pub(crate) fn find_window(ctx: &UiaContext, title: &str) -> napi::Result<IUIAutomationElement> {
     unsafe {
         let root = ctx.automation.GetRootElement().map_err(win_err)?;
         let condition = ctx.automation.CreateTrueCondition().map_err(win_err)?;
-        let children = root.FindAll(TreeScope_Children, &condition).map_err(win_err)?;
+        let children = root.FindAll(TreeScope_Children, &condition).map_err(timeout_or_win_err)?;
         let count = children.Length().map_err(win_err)?;
         let title_lower = title.to_lowercase();
+        // internal #216 — a window whose name could not be read in time is not "no such window".
+        let mut timed_out = false;
 
         for i in 0..count {
             let elem = children.GetElement(i).map_err(win_err)?;
-            if let Ok(name) = elem.CurrentName()
-                && name.to_string().to_lowercase().contains(&title_lower)
-            {
-                // Rebuild element with cache populated.
-                let cached = elem.BuildUpdatedCache(&ctx.cache_request).map_err(win_err)?;
-                return Ok(cached);
+            match elem.CurrentName() {
+                Ok(name) if name.to_string().to_lowercase().contains(&title_lower) => {
+                    // Rebuild element with cache populated.
+                    let cached = elem.BuildUpdatedCache(&ctx.cache_request).map_err(timeout_or_win_err)?;
+                    return Ok(cached);
+                }
+                Err(e) if super::is_timeout(&e) => timed_out = true,
+                _ => {}
             }
+        }
+        if timed_out {
+            return Err(napi::Error::from_reason(super::NOT_ANSWERING));
         }
     }
 

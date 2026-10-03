@@ -2683,22 +2683,18 @@ export function createDesktopExecutor(
           // the focus of a thread that is not running and refuses with `other_control`, a reason
           // that sends the caller to move the focus (win2, R18b/R21b: a 10 s hang, 7.0 s, then
           // `keyboard_target_unsafe` / `other_control`). The window may answer in a moment, so this
-          // says so and writes nothing.
-          if (classifyUiaRouteFailure(uiaErr) === "target_not_answering") {
-            const why = describeUiaRouteFailure("target_not_answering");
-            if (aimHwnd !== undefined) {
-              // The reason the row writes is the one the act answers (the route grid counts only
-              // those); which failure it was goes in `routeFailure`, as the click road writes it. A
-              // write by title ends unrecorded, as the ladder's own end below does.
-              probeRefusal("uia_set_value", "aim_route_failed", aimHwnd, entity, { routeFailure: "target_not_answering", addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
-              throw new AimedRouteFailedError(
-                `UIA value route for "${entity.label ?? entity.entityId}" on window ${aimHwnd}: the window did not answer. Not typing it another way.`,
-                aimHwnd,
-                { cause: uiaErr },
-                `The UIA value route to window ${aimHwnd} failed for "${quotedLabel(entity)}" because ${why}.`,
-              );
-            }
-            throw new Error(`UIA value route for "${entity.label ?? entity.entityId}": ${why}`, { cause: uiaErr });
+          // says so and writes nothing more. Both roads refuse alike: the title road had no row and
+          // an untyped error, whose published advice is a coordinate press (gate 2 on `fb2db897`).
+          const valueRoadFailure = classifyUiaRouteFailure(uiaErr);
+          if (valueRoadFailure === "target_not_answering" || valueRoadFailure === "target_stopped_answering") {
+            const why = describeUiaRouteFailure(valueRoadFailure);
+            probeRefusal("uia_set_value", "aim_route_failed", aimHwnd, entity, { routeFailure: valueRoadFailure, addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
+            throw new AimedRouteFailedError(
+              `UIA value route for "${entity.label ?? entity.entityId}"${aimHwnd !== undefined ? ` on window ${aimHwnd}` : ""}: ${valueRoadFailure}. Not typing it another way.`,
+              aimHwnd,
+              { cause: uiaErr },
+              `The UIA value route${aimHwnd !== undefined ? ` to window ${aimHwnd}` : ""} failed for "${quotedLabel(entity)}" because ${why}.`,
+            );
           }
           // A dead aim is NOT short-circuited here, unlike in the click path. That rung addresses
           // the same handle (`keyboardTypeBg` looks the window up by hwnd and throws when the
@@ -2909,6 +2905,18 @@ export function createDesktopExecutor(
               `and the window it is in does not take input; the act was not finished as a press.`,
             );
           }
+        }
+        // internal #216 — nor is a window that did not answer pressed by its remembered point: the UIA
+        // press may still be pending with it, and the point may be under another window by now
+        // (gate 2 on `fb2db897`).
+        if (routeFailure === "target_not_answering" || routeFailure === "target_stopped_answering") {
+          probeRefusal("uia_downgrade", "aim_route_failed", undefined, entity, { routeFailure, readVia, clickVia, addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
+          throw new AimedRouteFailedError(
+            `UIA click for "${entity.label ?? entity.entityId}" on the title-only road: ${routeFailure}. Not pressing where it used to be.`,
+            undefined,
+            { cause: uiaErr },
+            `The UIA route for "${quotedLabel(entity)}" failed because ${describeUiaRouteFailure(routeFailure)}; the act was not finished as a press.`,
+          );
         }
         // UIA click failed (stale tree, no pattern, an answer not recognised, etc.).
         // Prefer entity.rect (freshest, from most-recent candidate) over locator.visual.rect

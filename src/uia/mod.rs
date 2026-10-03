@@ -31,6 +31,11 @@ use windows::Win32::UI::Accessibility::*;
 /// — a wrong reason. A handle road must not call it a window that went away either.
 pub(crate) const NOT_ANSWERING: &str = "Window is not answering";
 
+/// The same timeout on the press or the write itself, after the element was found (gate 2 on
+/// `fb2db897`): the request may already be with the window, and run when it answers, so the caller
+/// must not be told nothing was done.
+pub(crate) const STOPPED_ANSWERING: &str = "Window stopped answering during the act";
+
 /// Whether a UI Automation call failed because the provider did not answer in time.
 pub(crate) fn is_timeout(e: &windows::core::Error) -> bool {
     e.code().0 as u32 == UIA_E_TIMEOUT
@@ -52,6 +57,9 @@ pub(crate) fn is_timeout(e: &windows::core::Error) -> bool {
 /// classes and kept as `Document`: a WinForms multi-line TextBox (`Edit` both), Chrome's page
 /// (`Document` both, no window of its own, a read-only value) and Word's `_WwG` (`Document` both, a
 /// window of its own but no `ValuePattern`).
+///
+/// "Takes a value" is a `ValuePattern` that is not read-only (gate 2 on `fb2db897`): a read-only
+/// windowed document — a page in a hosted browser control, a log view — is not a field to type in.
 pub(crate) fn reported_control_type(
     id: UIA_CONTROLTYPE_ID,
     own_window: bool,
@@ -75,7 +83,9 @@ pub(crate) unsafe fn cached_control_type(
             return Ok(id);
         }
         let own = elem.CachedNativeWindowHandle().is_ok_and(|h| !h.0.is_null());
-        let value = elem.GetCachedPattern(UIA_ValuePatternId).is_ok();
+        let value = elem
+            .GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .is_ok_and(|p| p.CachedIsReadOnly().is_ok_and(|r| r == false));
         Ok(reported_control_type(id, own, value))
     }
 }
@@ -90,7 +100,9 @@ pub(crate) unsafe fn current_control_type(
             return Ok(id);
         }
         let own = elem.CurrentNativeWindowHandle().is_ok_and(|h| !h.0.is_null());
-        let value = elem.GetCurrentPattern(UIA_ValuePatternId).is_ok();
+        let value = elem
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .is_ok_and(|p| p.CurrentIsReadOnly().is_ok_and(|r| r == false));
         Ok(reported_control_type(id, own, value))
     }
 }

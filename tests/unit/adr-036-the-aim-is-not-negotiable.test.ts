@@ -28,6 +28,8 @@ const h = vi.hoisted(() => ({
     click: { ok: true, element: "Start", error: null, code: null } as Record<string, unknown>,
     /** Make the native click throw, so a title click reaches the PowerShell fallback. */
     clickThrows: false,
+    /** The message it throws with, when not the default. */
+    clickThrowMessage: undefined as string | undefined,
     setValue: { ok: true, error: null, code: null } as Record<string, unknown>,
     elements: {
       windowTitle: "Untitled - Notepad",
@@ -98,7 +100,7 @@ vi.mock("../../src/engine/native-engine.js", () => ({
       // Two different failures, and cells on both sides of this rebase need both: `clickThrows` is
       // one call failing, after which the PowerShell script finishes the act and the answer says
       // `powershell`; `engineThrows` is "no engine at all", which is how the fallback roads open.
-      if (h.native.clickThrows) throw new Error("native click failed");
+      if (h.native.clickThrows) throw new Error(h.native.clickThrowMessage ?? "native click failed");
       if (h.native.engineThrows) throw new Error("engine unavailable");
       return h.native.click;
     },
@@ -166,6 +168,7 @@ beforeEach(() => {
   h.psOutput = '{"ok":true}';
   h.native.textThrows = false;
   h.native.clickThrows = false;
+  h.native.clickThrowMessage = undefined;
   h.native.engineThrows = false;
   h.calls.nativeHwnds = [];
   unambiguous();
@@ -184,6 +187,13 @@ describe("the engine says how it moved the focus, and only the engine (internal 
     expect(await clickElement("Untitled - Notepad", "OK")).not.toHaveProperty("focusedBy");
     h.native.setValue = { ok: true, error: null, code: null };
     expect(await setElementValue("Untitled - Notepad", "hello", "Text")).not.toHaveProperty("focusedBy");
+  });
+
+  it("a native act that ran past its 8 s is not pressed again through PowerShell (gate 2 on fb2db897)", async () => {
+    h.native.clickThrows = true;
+    h.native.clickThrowMessage = "UIA operation timed out after 8000ms";
+    expect(await clickElement("Untitled - Notepad", "OK")).toEqual({ ok: false, error: "Window stopped answering during the act", via: "native" });
+    expect(h.calls.ps).toHaveLength(0);
   });
 
   it("the PowerShell road has no focus step, so it names none", async () => {
