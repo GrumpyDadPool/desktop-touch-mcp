@@ -39,12 +39,32 @@ pub(crate) struct UiaContext {
     /// ControlView filter for `FindAllBuildCache(TreeScope_Children)`.
     /// Created once and reused — matches the ControlViewWalker scope.
     pub control_view_condition: IUIAutomationCondition,
+    /// internal #216 — true for the act client (`CUIAutomation8`), whose element search reports a
+    /// windowed `Document` that takes a value as `Edit` (`mod.rs::reported_control_type`).
+    pub reports_documents_as_edit: bool,
+}
+
+/// internal #216 — the two clients the COM thread holds, one per use.
+///
+/// **Reads** (the element tree, text, scroll positions, the focused element) go through the client
+/// 2.0.0 had, `CUIAutomation`: every read measured since September stands on it, and it reads some
+/// Win32 text controls differently from the newer class (Notepad's text area is `Edit` to it,
+/// `Document` to `CUIAutomation8`; win2 R18b) and waits for an unresponsive window instead of
+/// giving up after a connection timeout (win2 R20).
+///
+/// **Acts** (a press, a value write, a scroll) go through `CUIAutomation8` with `AutoSetFocus` off,
+/// the only class that offers the switch, and move the focus themselves (`focus_first.rs`). An act
+/// finds its element again on its own client, so no element crosses from one client to the other.
+/// When the act client cannot be built, acts run on the read client, as before this change.
+pub(crate) struct UiaContexts {
+    pub read: UiaContext,
+    pub act: Option<UiaContext>,
 }
 
 // ─── Task type ───────────────────────────────────────────────────────────────
 
-/// A boxed closure that borrows `UiaContext` on the COM thread.
-pub(crate) type UiaTask = Box<dyn FnOnce(&UiaContext) + Send + 'static>;
+/// A boxed closure that borrows the COM thread's clients.
+pub(crate) type UiaTask = Box<dyn FnOnce(&UiaContexts) + Send + 'static>;
 
 // ─── Thread handle + slot (ADR-007 P5c-0b) ───────────────────────────────────
 //
@@ -284,7 +304,7 @@ fn com_thread_main(rx: Receiver<UiaTask>, shutdown_rx: Receiver<()>) {
         }
     }
 
-    let ctx = match build_context() {
+    let read = match build_context(Client::Read) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[uia-com] Failed to initialise UIA context: {e}");
@@ -292,6 +312,14 @@ fn com_thread_main(rx: Receiver<UiaTask>, shutdown_rx: Receiver<()>) {
             return;
         }
     };
+    let act = match build_context(Client::Act) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("[uia-com] Failed to initialise the act client: {e} -- UIA acts use the read client and move the keyboard focus");
+            None
+        }
+    };
+    let ctxs = UiaContexts { read, act };
 
     // ── Internal #168: the focus handler is registered OFF this thread ──────
     // `AddFocusChangedEventHandler` is desktop-wide and synchronous, and it has no deadline. With one
@@ -316,7 +344,7 @@ fn com_thread_main(rx: Receiver<UiaTask>, shutdown_rx: Receiver<()>) {
             recv(rx) -> msg => match msg {
                 Ok(task) => {
                     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        task(&ctx);
+                        task(&ctxs);
                     }));
                     if let Err(info) = res {
                         eprintln!("[uia-com] Task panicked: {info:?}");
@@ -370,7 +398,7 @@ fn spawn_focus_registration(stop_rx: Receiver<()>) -> Option<thread::JoinHandle<
                 }
             }
             {
-                let ctx = match build_context() {
+                let ctx = match build_context(Client::Read) {
                     Ok(c) => c,
                     Err(e) => {
                         set_focus_registration(FOCUS_FAILED);
@@ -427,29 +455,48 @@ fn spawn_focus_registration(stop_rx: Receiver<()>) -> Option<thread::JoinHandle<
 /// it on).
 ///
 /// `AutoSetFocus` is on `IUIAutomation2`, which only the `CUIAutomation8` class answers: the older
-/// `CUIAutomation` refused the interface (win2, E_NOINTERFACE). A machine without the newer class
-/// keeps the older client and its focus moves, and says so once on stderr.
-unsafe fn create_automation() -> windows::core::Result<IUIAutomation> {
+/// `CUIAutomation` refused the interface (win2, E_NOINTERFACE). Only acts use this client
+/// (`UiaContexts`); a machine without the newer class acts through the read client, and says so.
+///
+/// Its `ConnectionTimeout` is raised from the default 2 s to `ACT_CONNECTION_TIMEOUT_MS`. MEASURED
+/// win2 2026-10-03 (`RESULTS-R20.md`, plain UIA, the target's UI thread asleep): `ElementFromHandle`
+/// after the hang began failed with `UIA_E_TIMEOUT` at 2.0 s on the default, at 8.0 s with the
+/// timeout set to 8000, and with it set to 8000 a 5 s hang was waited out and the write landed;
+/// the older class has no such limit and waited 9.7 s for a 10 s hang. An act finds its element
+/// after any hang began, so the default cut writes to a window busy for 2 s — which 2.0.0 waited for
+/// — and the act then fell to the keyboard rung with a false reason (win2 R18b/R19). The user's
+/// decision (2026-10-03): wait, as 2.0.0 did. Kept under the act's own 8 s (`actions.rs`) so the
+/// COM thread is free again before the next task is given up on.
+unsafe fn create_act_automation() -> windows::core::Result<IUIAutomation> {
     unsafe {
-        match CoCreateInstance::<_, IUIAutomation2>(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) {
-            Ok(automation2) => {
-                if let Err(e) = automation2.SetAutoSetFocus(false) {
-                    eprintln!("[uia] AutoSetFocus could not be turned off: {e} -- UIA actions will move the keyboard focus");
-                }
-                automation2.cast()
-            }
-            Err(e) => {
-                eprintln!("[uia] CUIAutomation8 is not available: {e} -- UIA actions will move the keyboard focus");
-                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-            }
+        let automation2: IUIAutomation2 = CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
+        if let Err(e) = automation2.SetAutoSetFocus(false) {
+            eprintln!("[uia] AutoSetFocus could not be turned off: {e} -- UIA acts will move the keyboard focus");
         }
+        if let Err(e) = automation2.SetConnectionTimeout(ACT_CONNECTION_TIMEOUT_MS) {
+            eprintln!("[uia] ConnectionTimeout could not be set: {e} -- UIA acts give up on a busy window after 2 s");
+        }
+        automation2.cast()
     }
 }
 
+/// See `create_act_automation`.
+const ACT_CONNECTION_TIMEOUT_MS: u32 = 7_000;
+
+/// Which of the two clients `build_context` builds (`UiaContexts`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Client {
+    Read,
+    Act,
+}
+
 /// Build persistent COM objects that live for the entire thread lifetime.
-fn build_context() -> windows::core::Result<UiaContext> {
+fn build_context(client: Client) -> windows::core::Result<UiaContext> {
     unsafe {
-        let automation = create_automation()?;
+        let automation: IUIAutomation = match client {
+            Client::Read => CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?,
+            Client::Act => create_act_automation()?,
+        };
 
         let walker = automation.ControlViewWalker()?;
 
@@ -474,6 +521,7 @@ fn build_context() -> windows::core::Result<UiaContext> {
             cache_request: cr,
             tree_cache_request: tree_cr,
             control_view_condition: cv_condition,
+            reports_documents_as_edit: client == Client::Act,
         })
     }
 }
@@ -514,9 +562,27 @@ where
     F: FnOnce(&UiaContext) -> napi::Result<T> + Send + 'static,
     T: Send + 'static,
 {
+    run_with_timeout(move |ctxs: &UiaContexts| f(&ctxs.read), timeout_ms)
+}
+
+/// internal #216 — `execute_with_timeout` on the act client (`UiaContexts`): for the tasks that press,
+/// write or scroll. Falls back to the read client when the act client could not be built.
+pub(crate) fn execute_act_with_timeout<F, T>(f: F, timeout_ms: u32) -> napi::Result<T>
+where
+    F: FnOnce(&UiaContext) -> napi::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    run_with_timeout(move |ctxs: &UiaContexts| f(ctxs.act.as_ref().unwrap_or(&ctxs.read)), timeout_ms)
+}
+
+fn run_with_timeout<F, T>(f: F, timeout_ms: u32) -> napi::Result<T>
+where
+    F: FnOnce(&UiaContexts) -> napi::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
     let (reply_tx, reply_rx) = bounded(1);
-    let task: UiaTask = Box::new(move |ctx| {
-        let result = f(ctx);
+    let task: UiaTask = Box::new(move |ctxs| {
+        let result = f(ctxs);
         let _ = reply_tx.send(result);
     });
     ensure_uia_thread()

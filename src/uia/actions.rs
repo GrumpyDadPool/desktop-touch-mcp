@@ -55,14 +55,14 @@ pub struct InsertTextOptions {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 pub fn click_element(opts: ClickElementOptions) -> napi::Result<ActionResult> {
-    thread::execute_with_timeout(
+    thread::execute_act_with_timeout(
         move |ctx| click_element_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,
     )
 }
 
 pub fn set_value(opts: SetValueOptions) -> napi::Result<ActionResult> {
-    thread::execute_with_timeout(
+    thread::execute_act_with_timeout(
         move |ctx| set_value_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,
     )
@@ -619,7 +619,7 @@ fn find_among_descendants(
             stack.push((sib, depth));
         }
 
-        if matches_with_ct(&elem, &name_lower, automation_id, &ct_lower) {
+        if matches_with_ct(&elem, &name_lower, automation_id, &ct_lower, ctx.reports_documents_as_edit) {
             return Ok(elem);
         }
 
@@ -643,6 +643,7 @@ fn matches_with_ct(
     name_lower: &Option<String>,
     automation_id: Option<&str>,
     ct_lower: &Option<String>,
+    documents_as_edit: bool,
 ) -> bool {
     let name_ok = match name_lower {
         Some(target) => unsafe {
@@ -663,7 +664,9 @@ fn matches_with_ct(
 
     let ct_ok = match ct_lower {
         Some(target) => unsafe {
-            super::cached_control_type(elem)
+            // internal #216 — on the act client, the type the read client would have reported, so a
+            // filter taken from a read finds the same element (`mod.rs::reported_control_type`).
+            (if documents_as_edit { super::cached_control_type(elem) } else { elem.CachedControlType() })
                 .map(|id| {
                     super::control_type_name(id)
                         .to_lowercase()

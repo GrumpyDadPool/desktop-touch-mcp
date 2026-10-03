@@ -80,7 +80,8 @@ pub struct ReadScrollPercentAtHwndOptions {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 pub fn scroll_into_view(opts: ScrollIntoViewOptions) -> napi::Result<ScrollResult> {
-    thread::execute_with_timeout(
+    // internal #216 — it changes the window, so it runs on the act client (`thread.rs::UiaContexts`).
+    thread::execute_act_with_timeout(
         move |ctx| scroll_into_view_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,
     )
@@ -94,7 +95,8 @@ pub fn get_scroll_ancestors(opts: ScrollAncestorsOptions) -> napi::Result<Vec<Sc
 }
 
 pub fn scroll_by_percent(opts: ScrollByPercentOptions) -> napi::Result<ScrollResult> {
-    thread::execute_with_timeout(
+    // internal #216 — it changes the window, so it runs on the act client (`thread.rs::UiaContexts`).
+    thread::execute_act_with_timeout(
         move |ctx| scroll_by_percent_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,
     )
@@ -106,7 +108,8 @@ pub fn scroll_by_percent(opts: ScrollByPercentOptions) -> napi::Result<ScrollRes
 /// ScrollPattern is reachable; the caller (TS dispatcher) interprets this as
 /// "fall through to Tier 4 SendInput" until Phase 4 Tier 3 lands.
 pub fn scroll_by_wheel_at_hwnd(opts: ScrollByWheelAtHwndOptions) -> napi::Result<ScrollResult> {
-    thread::execute_with_timeout(
+    // internal #216 — it changes the window, so it runs on the act client (`thread.rs::UiaContexts`).
+    thread::execute_act_with_timeout(
         move |ctx| scroll_by_wheel_at_hwnd_impl(ctx, &opts),
         DEFAULT_TIMEOUT_MS,
     )
@@ -844,7 +847,9 @@ fn walk_scroll_ancestors(
                     .CurrentAutomationId()
                     .map(|b| b.to_string())
                     .unwrap_or_default();
-                let ct_id = super::current_control_type(&parent).unwrap_or(UIA_CustomControlTypeId);
+                let ct_id = parent
+                    .CurrentControlType()
+                    .unwrap_or(UIA_CustomControlTypeId);
                 let ct = control_type_name(ct_id).to_string();
 
                 let vp = scroll.CurrentVerticalScrollPercent().unwrap_or(-1.0);
