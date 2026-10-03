@@ -69,7 +69,8 @@ export type UiaRouteFailure =
   | "element_read_only"
   | "target_not_answering"
   | "target_stopped_answering"
-  | "classic_client_busy";
+  | "classic_client_busy"
+  | "classic_client_unavailable";
 
 /** Written by the bridge itself (script and native), so they arrive as the whole message. */
 const WHOLE: ReadonlyMap<string, UiaRouteFailure> = new Map([
@@ -91,6 +92,11 @@ const WHOLE: ReadonlyMap<string, UiaRouteFailure> = new Map([
   // internal #216 — `src/uia/thread.rs::CLASSIC_BUSY`: an earlier `uiaClient: "classic"` call still
   // holds the classic client's thread.
   ["The classic UI Automation client is busy with an earlier call", "classic_client_busy"],
+  // …and the classic client that cannot run at all: no native engine (`uia-bridge.ts`), or its thread
+  // could not start (`src/uia/thread.rs`). win2 R28 c5: without this word the write fell to the
+  // keyboard rung and was refused as `other_control`, and the click ended with no reason.
+  ["The classic UI Automation client needs the native engine, which is unavailable", "classic_client_unavailable"],
+  ["The classic UI Automation thread is unavailable", "classic_client_unavailable"],
 ]);
 
 /** .NET's text inside PowerShell's method-invocation wrapper — the wrapper names the method. */
@@ -124,6 +130,8 @@ export function describeUiaRouteFailure(kind: UiaRouteFailure): string {
       return "the window did not answer UI Automation for 7 seconds (it may be busy), so nothing was sent to it — wait and try again";
     case "classic_client_busy":
       return "an earlier call through the classic client (uiaClient: \"classic\") is still running, so nothing was sent — wait until it finishes; until then, acts on the window it touched can move the keyboard focus even through the default client";
+    case "classic_client_unavailable":
+      return "the classic client (uiaClient: \"classic\") cannot run here (the native engine is unavailable), so nothing was sent — use the default client";
     case "target_stopped_answering":
       return "the window stopped answering UI Automation during the press or write (it may be busy); it may still take effect when the window answers — look at it before trying again, so it is not done twice";
   }

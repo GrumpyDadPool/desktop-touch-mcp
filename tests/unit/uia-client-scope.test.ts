@@ -3,7 +3,7 @@
  * and the reply made through it says what that client costs.
  */
 import { describe, it, expect } from "vitest";
-import { withUiaClient, uiaClassicRequested, markClassicUsed, CLASSIC_NOTE, CLASSIC_NOTE_NOT_USED } from "../../src/engine/uia-client-scope.js";
+import { withUiaClient, uiaClassicRequested, markClassicUsed, markClassicRefused, CLASSIC_NOTE, CLASSIC_NOTE_NOT_USED } from "../../src/engine/uia-client-scope.js";
 
 describe("the classic scope", () => {
   it("is on inside withUiaClient('classic') and off outside it, and for 'default' and undefined", async () => {
@@ -36,6 +36,14 @@ describe("the reply made through the classic client", () => {
     const unused = await withClassicNote("classic", async () => reply);
     expect(JSON.parse((unused.content[0] as { text: string }).text)).toEqual({ ok: true, uiaClient: { client: "classic", used: false, note: CLASSIC_NOTE_NOT_USED } });
     expect(await withClassicNote(undefined, async () => reply)).toBe(reply);
+  });
+
+  it("a classic call refused before it ran says why (win2 R28: a busy discover said nothing)", async () => {
+    const { withClassicNote } = await import("../../src/tools/desktop-register.js");
+    const reply = { content: [{ type: "text" as const, text: JSON.stringify({ ok: false }) }] };
+    const refused = await withClassicNote("classic", async () => { markClassicRefused("The classic UI Automation client is busy with an earlier call"); return reply; });
+    expect(JSON.parse((refused.content[0] as { text: string }).text).uiaClient)
+      .toEqual({ client: "classic", used: false, why: "The classic UI Automation client is busy with an earlier call", note: CLASSIC_NOTE_NOT_USED });
   });
 
   it("marking outside a classic call does nothing", () => {

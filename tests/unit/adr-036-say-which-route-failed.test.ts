@@ -39,6 +39,8 @@ const MEASURED: Array<[string, string]> = [
   ["Window is not answering", "target_not_answering"],
   ["Window stopped answering during the act", "target_stopped_answering"],
   ["The classic UI Automation client is busy with an earlier call", "classic_client_busy"],
+  ["The classic UI Automation client needs the native engine, which is unavailable", "classic_client_unavailable"],
+  ["The classic UI Automation thread is unavailable", "classic_client_unavailable"],
 ];
 
 describe("the classifier knows the answers the backend gave, and only those", () => {

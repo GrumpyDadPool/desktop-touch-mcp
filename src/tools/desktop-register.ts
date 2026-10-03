@@ -947,14 +947,14 @@ export const desktopDiscoverRawHandler = (input: unknown): Promise<ToolResult> =
  */
 export async function withClassicNote(client: UiaClient | undefined, run: () => Promise<ToolResult>): Promise<ToolResult> {
   if (client !== "classic") return run();
-  const { result, used } = await runClassic(run);
+  const { result, used, refusal } = await runClassic(run);
   // Only what the classic client answered is said to come from it, and a call of it that ran past its
   // limit is said to be still running: while it is, the default client's acts on that window move the
   // focus too (gate 2 and codex on `74d5f6bc`).
   const stillRunning = used && (nativeUia?.uiaClassicInUse?.() ?? false);
   const uiaClient = used
     ? { client: "classic", used: true, stillRunning, note: stillRunning ? CLASSIC_NOTE_STILL_RUNNING : CLASSIC_NOTE }
-    : { client: "classic", used: false, note: CLASSIC_NOTE_NOT_USED };
+    : { client: "classic", used: false, ...(refusal !== undefined && { why: refusal }), note: CLASSIC_NOTE_NOT_USED };
   const [first, ...rest] = result.content;
   if (first?.type !== "text") return result;
   try {

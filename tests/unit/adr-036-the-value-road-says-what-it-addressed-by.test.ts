@@ -121,6 +121,17 @@ describe("a window that did not answer is refused, not typed into another way (i
     expect(keyboardTypeBg).not.toHaveBeenCalled();
   });
 
+  it("a classic write that cannot run says so, and is not typed another way (win2 R28 c5)", async () => {
+    const keyboardTypeBg = vi.fn(async () => {});
+    const none = vi.fn(async () => { throw Object.assign(new Error("The classic UI Automation client needs the native engine, which is unavailable"), { uiaVia: "native" }); });
+    const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+    const err = await createDesktopExecutor(aimed, { ...deps(), uiaSetValue: none, keyboardTypeBg })(entity, "type", "PROBE-VR")
+      .then(() => null, (e: unknown) => e as Error & { callerDetail?: string });
+    expect(err?.name).toBe("AimedRouteFailedError");
+    expect(err?.callerDetail).toContain("native engine is unavailable");
+    expect(keyboardTypeBg).not.toHaveBeenCalled();
+  });
+
   it("a classic write refused as busy is not typed another way (internal #216)", async () => {
     const keyboardTypeBg = vi.fn(async () => {});
     const busy = vi.fn(async () => { throw Object.assign(new Error("The classic UI Automation client is busy with an earlier call"), { uiaVia: "native" }); });
@@ -362,7 +373,7 @@ describe("the UIA click road, and its refusals and downgrade", () => {
   });
 
   it("does not press a window that did not answer by its remembered point, on the title road (gate 2 on fb2db897)", async () => {
-    for (const text of ["Window is not answering", "Window stopped answering during the act", "The classic UI Automation client is busy with an earlier call"]) {
+    for (const text of ["Window is not answering", "Window stopped answering during the act", "The classic UI Automation client is busy with an earlier call", "The classic UI Automation client needs the native engine, which is unavailable"]) {
       const d = { uiaClick: failing(text), mouseClick: vi.fn(async () => {}) };
       const err = await click({ ...button, locator: { uia: { name: "GO" } } }, { kind: "aim", title: "VR-CELL" }, d);
       expect((err as Error).name).toBe("AimedRouteFailedError");

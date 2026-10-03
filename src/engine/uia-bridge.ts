@@ -5,7 +5,7 @@ import { AIM_WINDOW_GONE, AimedWindowGoneError } from "./aim.js";
 import { computeViewportPosition } from "../utils/viewport-position.js";
 import { nativeUia, nativeUiaState, type NativeUiElement } from "./native-engine.js";
 import { isExcludedTitle, isExcludedWindowHandle, isWindowGone, windowAnswers, windowsWhoseTitleContains } from "./win32.js";
-import { markClassicUsed, uiaClassicRequested } from "./uia-client-scope.js";
+import { markClassicRefused, markClassicUsed, uiaClassicRequested } from "./uia-client-scope.js";
 import { WindowExcludedError, hasExcludedPids } from "./tool-exclusion.js";
 
 const execFileAsync = promisify(execFile);
@@ -1600,7 +1600,10 @@ export async function getUiElements(
     }
   }
   if (options?.nativeOnly) throw new Error("uiaGetElements: the native read is unavailable and the caller asked for it alone");
-  if (classic) throw new Error("uiaGetElements: the classic client needs the native engine, which is unavailable");
+  if (classic) {
+    markClassicRefused(CLASSIC_NEEDS_NATIVE);
+    throw new Error(CLASSIC_NEEDS_NATIVE);
+  }
 
   // PowerShell fallback (existing implementation)
   const psMaxDepth = options?.fallbackLimits?.maxDepth ?? maxDepth;
@@ -1875,7 +1878,10 @@ export async function clickElement(
     }
   }
   // internal #216 — nor run there when the engine is missing (codex on `74d5f6bc`).
-  if (uiaClassicRequested()) return { ok: false, error: CLASSIC_NEEDS_NATIVE, via: "native" };
+  if (uiaClassicRequested()) {
+    markClassicRefused(CLASSIC_NEEDS_NATIVE);
+    return { ok: false, error: CLASSIC_NEEDS_NATIVE, via: "native" };
+  }
 
   // PowerShell fallback — use hwnd-based script when available (H3)
   const script = options?.hwnd !== undefined
@@ -1896,7 +1902,10 @@ function isNativeActTimeout(e: unknown): boolean {
  * still running there; "busy" and "unavailable" mean it never started.
  */
 function classicCallReached(e: unknown): boolean {
-  return isNativeActTimeout(e);
+  if (isNativeActTimeout(e)) return true;
+  // Not reached: say why, so the reply can (win2 R28: a busy classic discover said nothing).
+  if (e instanceof Error) markClassicRefused(e.message);
+  return false;
 }
 
 /** What a classic act answers when the native engine is unavailable (no PowerShell road for it). */
@@ -1941,7 +1950,10 @@ export async function setElementValue(
       console.warn("[uia-bridge] Native uiaSetValue failed, falling back to PowerShell:", e);
     }
   }
-  if (uiaClassicRequested()) return { ok: false, error: CLASSIC_NEEDS_NATIVE, via: "native" };
+  if (uiaClassicRequested()) {
+    markClassicRefused(CLASSIC_NEEDS_NATIVE);
+    return { ok: false, error: CLASSIC_NEEDS_NATIVE, via: "native" };
+  }
 
   // PowerShell fallback — use hwnd-based script when available (H3)
   const script = options?.hwnd !== undefined

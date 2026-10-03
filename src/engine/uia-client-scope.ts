@@ -16,7 +16,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 export type UiaClient = "default" | "classic";
 
-interface ClassicScope { used: boolean }
+interface ClassicScope { used: boolean; refusal?: string }
 
 const scope = new AsyncLocalStorage<ClassicScope>();
 
@@ -29,15 +29,21 @@ export function withUiaClient<T>(client: UiaClient | undefined, fn: () => Promis
  * Like `withUiaClient("classic", fn)`, and also says whether a native call went to the classic
  * client while `fn` ran.
  */
-export async function runClassic<T>(fn: () => Promise<T>): Promise<{ result: T; used: boolean }> {
+export async function runClassic<T>(fn: () => Promise<T>): Promise<{ result: T; used: boolean; refusal?: string }> {
   const state: ClassicScope = { used: false };
   const result = await scope.run(state, fn);
-  return { result, used: state.used };
+  return { result, used: state.used, ...(state.refusal !== undefined && { refusal: state.refusal }) };
 }
 
 /** Whether the call in progress asked for the classic client. */
 export function uiaClassicRequested(): boolean {
   return scope.getStore() !== undefined;
+}
+
+/** Called by the bridge when the classic client refused a call before running it (busy, unavailable). */
+export function markClassicRefused(why: string): void {
+  const state = scope.getStore();
+  if (state && state.refusal === undefined) state.refusal = why;
 }
 
 /** Called by the bridge when a native call has gone to the classic client. */
