@@ -88,7 +88,7 @@ fn element_at_point(ctx: &UiaContext, x: i32, y: i32) -> Option<UiaFocusInfo> {
 fn element_to_focus_info(elem: &IUIAutomationElement) -> Option<UiaFocusInfo> {
     unsafe {
         let name = elem.CachedName().ok()?.to_string();
-        let ct = elem.CachedControlType().ok()?;
+        let ct = super::cached_control_type(elem).ok()?;
         let control_type = control_type_name(ct).to_string();
         let automation_id = elem.CachedAutomationId().ok().map(|b| b.to_string());
 

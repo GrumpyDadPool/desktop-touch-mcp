@@ -36,17 +36,19 @@ pub(crate) fn is_timeout(e: &windows::core::Error) -> bool {
     e.code().0 as u32 == UIA_E_TIMEOUT
 }
 
-/// internal #216 — the control type the act client's element search matches against: the type UI
-/// Automation answers, except that a `Document` that is a window of its own and takes a value is the
-/// `Edit` the read client reports.
+/// internal #216 — the control type this engine reports for an element: the type UI Automation
+/// answers, except that a `Document` that is a window of its own and takes a value is reported as
+/// `Edit`.
 ///
-/// Acts run on `CUIAutomation8` so that `AutoSetFocus` can be turned off (`thread.rs::UiaContexts`),
-/// and that class reads some Win32 text controls differently from the read client. MEASURED win2 2026-10-03 (internal
+/// The engine's clients are `CUIAutomation8` so that `AutoSetFocus` can be off (`thread.rs`), and that
+/// class reads some Win32 text controls differently from the older `CUIAutomation`. MEASURED win2 2026-10-03 (internal
 /// `dev/v210-dogfood`, `RESULTS-R18b.md`, plain UIA with both classes side by side): Notepad's text
 /// area and a WinForms RichTextBox are `Edit` to the old class and `Document` to the new one — each a
-/// window of its own, with `ValuePattern` and `IsReadOnly` false. Reads stay on the old class, so
-/// discover still offers `type` there; this keeps an act's type filter finding what the read named
-/// (a caller's `controlType: "Edit"` on Notepad's text area). Unchanged between the
+/// window of its own, with `ValuePattern` and `IsReadOnly` false. Everything in the server that tells a
+/// text field from a page reads `Edit` (discover's role and actions, the keyboard rung, the click
+/// road's type filter), so Notepad stopped being offered `type`. The Store Notepad's text area
+/// (`RichEditD2DPT`) is `Document` to both classes and was offered no `type` by 2.0.0 either (win2
+/// R23c); it is a window of its own that takes a value, so it is reported as `Edit` too. Unchanged between the
 /// classes and kept as `Document`: a WinForms multi-line TextBox (`Edit` both), Chrome's page
 /// (`Document` both, no window of its own, a read-only value) and Word's `_WwG` (`Document` both, a
 /// window of its own but no `ValuePattern`).
@@ -74,6 +76,21 @@ pub(crate) unsafe fn cached_control_type(
         }
         let own = elem.CachedNativeWindowHandle().is_ok_and(|h| !h.0.is_null());
         let value = elem.GetCachedPattern(UIA_ValuePatternId).is_ok();
+        Ok(reported_control_type(id, own, value))
+    }
+}
+
+/// [`reported_control_type`] read live, for the roads that hold an element with no cache.
+pub(crate) unsafe fn current_control_type(
+    elem: &IUIAutomationElement,
+) -> windows::core::Result<UIA_CONTROLTYPE_ID> {
+    unsafe {
+        let id = elem.CurrentControlType()?;
+        if id != UIA_DocumentControlTypeId {
+            return Ok(id);
+        }
+        let own = elem.CurrentNativeWindowHandle().is_ok_and(|h| !h.0.is_null());
+        let value = elem.GetCurrentPattern(UIA_ValuePatternId).is_ok();
         Ok(reported_control_type(id, own, value))
     }
 }

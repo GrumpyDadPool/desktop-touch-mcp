@@ -636,7 +636,7 @@ fn find_among_descendants(
             stack.push((sib, depth));
         }
 
-        if matches_with_ct(&elem, &name_lower, automation_id, &ct_lower, ctx.reports_documents_as_edit) {
+        if matches_with_ct(&elem, &name_lower, automation_id, &ct_lower) {
             return Ok(elem);
         }
 
@@ -663,7 +663,6 @@ fn matches_with_ct(
     name_lower: &Option<String>,
     automation_id: Option<&str>,
     ct_lower: &Option<String>,
-    documents_as_edit: bool,
 ) -> bool {
     let name_ok = match name_lower {
         Some(target) => unsafe {
@@ -684,9 +683,9 @@ fn matches_with_ct(
 
     let ct_ok = match ct_lower {
         Some(target) => unsafe {
-            // internal #216 — on the act client, the type the read client would have reported, so a
-            // filter taken from a read finds the same element (`mod.rs::reported_control_type`).
-            (if documents_as_edit { super::cached_control_type(elem) } else { elem.CachedControlType() })
+            // internal #216 — the type the reads report (`mod.rs::reported_control_type`), so a filter
+            // taken from a read finds the same element.
+            super::cached_control_type(elem)
                 .map(|id| {
                     super::control_type_name(id)
                         .to_lowercase()

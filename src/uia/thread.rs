@@ -39,23 +39,23 @@ pub(crate) struct UiaContext {
     /// ControlView filter for `FindAllBuildCache(TreeScope_Children)`.
     /// Created once and reused — matches the ControlViewWalker scope.
     pub control_view_condition: IUIAutomationCondition,
-    /// internal #216 — true for the act client (`CUIAutomation8`), whose element search reports a
-    /// windowed `Document` that takes a value as `Edit` (`mod.rs::reported_control_type`).
-    pub reports_documents_as_edit: bool,
 }
 
-/// internal #216 — the two clients the COM thread holds, one per use.
+/// internal #216 — the two clients the COM thread holds, one for reads and one for acts. **Both are
+/// `CUIAutomation8` with `AutoSetFocus` off**, and so is the focus-event registration's.
 ///
-/// **Reads** (the element tree, text, scroll positions, the focused element) go through the client
-/// 2.0.0 had, `CUIAutomation`: every read measured since September stands on it, and it reads some
-/// Win32 text controls differently from the newer class (Notepad's text area is `Edit` to it,
-/// `Document` to `CUIAutomation8`; win2 R18b) and waits for an unresponsive window instead of
-/// giving up after a connection timeout (win2 R20).
+/// They were split by class first (reads on the older `CUIAutomation`, 2.0.0's), and that undid the
+/// switch. MEASURED win2 2026-10-03 (`RESULTS-R23co.md`, `RESULTS-R24.md`, plain UIA, a Chrome page
+/// behind a key-counting window): once a client with `AutoSetFocus` on — the older class, or a
+/// `CUIAutomation8` left at its default — had touched a window's provider, a `SetValue` from a client
+/// with it off moved the focus and took the foreground anyway (3/3 per arm), in another thread too
+/// (3/3), and when the "on" client touched it after the first write (the next write, 3/3). A client
+/// that touched only another window left it alone (3/3), and two clients both off were clean (3/3).
+/// Every act here follows a read of the same window, so no client in this process may have it on.
 ///
-/// **Acts** (a press, a value write, a scroll) go through `CUIAutomation8` with `AutoSetFocus` off,
-/// the only class that offers the switch, and move the focus themselves (`focus_first.rs`). An act
-/// finds its element again on its own client, so no element crosses from one client to the other.
-/// When the act client cannot be built, acts run on the read client, as before this change.
+/// They stay two because their uses differ only in what they may wait for; an act still finds its
+/// element again on its own client. When `CUIAutomation8` cannot be built, both fall back to the
+/// older class, as before 2.1.0, and the server says so.
 pub(crate) struct UiaContexts {
     pub read: UiaContext,
     pub act: Option<UiaContext>,
@@ -304,7 +304,7 @@ fn com_thread_main(rx: Receiver<UiaTask>, shutdown_rx: Receiver<()>) {
         }
     }
 
-    let read = match build_context(Client::Read) {
+    let read = match build_context() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[uia-com] Failed to initialise UIA context: {e}");
@@ -312,7 +312,7 @@ fn com_thread_main(rx: Receiver<UiaTask>, shutdown_rx: Receiver<()>) {
             return;
         }
     };
-    let act = match build_context(Client::Act) {
+    let act = match build_context() {
         Ok(c) => Some(c),
         Err(e) => {
             eprintln!("[uia-com] Failed to initialise the act client: {e} -- UIA acts use the read client and move the keyboard focus");
@@ -398,7 +398,7 @@ fn spawn_focus_registration(stop_rx: Receiver<()>) -> Option<thread::JoinHandle<
                 }
             }
             {
-                let ctx = match build_context(Client::Read) {
+                let ctx = match build_context() {
                     Ok(c) => c,
                     Err(e) => {
                         set_focus_registration(FOCUS_FAILED);
@@ -455,48 +455,43 @@ fn spawn_focus_registration(stop_rx: Receiver<()>) -> Option<thread::JoinHandle<
 /// it on).
 ///
 /// `AutoSetFocus` is on `IUIAutomation2`, which only the `CUIAutomation8` class answers: the older
-/// `CUIAutomation` refused the interface (win2, E_NOINTERFACE). Only acts use this client
-/// (`UiaContexts`); a machine without the newer class acts through the read client, and says so.
+/// `CUIAutomation` refused the interface (win2, E_NOINTERFACE). Every client in this process is made
+/// here (`UiaContexts` says why none may keep the switch on). A machine without the newer class gets
+/// the older client, whose focus moves, and says so.
 ///
-/// Its `ConnectionTimeout` is raised from the default 2 s to `ACT_CONNECTION_TIMEOUT_MS`. MEASURED
-/// win2 2026-10-03 (`RESULTS-R20.md`, plain UIA, the target's UI thread asleep): `ElementFromHandle`
+/// Its `ConnectionTimeout` is raised from the default 2 s to `CONNECTION_TIMEOUT_MS`. MEASURED win2
+/// 2026-10-03 (`RESULTS-R20.md`, plain UIA, the target's UI thread asleep): `ElementFromHandle`
 /// after the hang began failed with `UIA_E_TIMEOUT` at 2.0 s on the default, at 8.0 s with the
-/// timeout set to 8000, and with it set to 8000 a 5 s hang was waited out and the write landed;
-/// the older class has no such limit and waited 9.7 s for a 10 s hang. An act finds its element
-/// after any hang began, so the default cut writes to a window busy for 2 s — which 2.0.0 waited for
-/// — and the act then fell to the keyboard rung with a false reason (win2 R18b/R19). The user's
-/// decision (2026-10-03): wait, as 2.0.0 did. Kept under the act's own 8 s (`actions.rs`) so the
-/// COM thread is free again before the next task is given up on.
-unsafe fn create_act_automation() -> windows::core::Result<IUIAutomation> {
+/// timeout set to 8000, and with it set to 8000 a 5 s hang was waited out; the older class has no
+/// such limit. A read or an act finds its element after any hang began, so the default gave up on a
+/// window busy for 2 s, which 2.0.0 waited for. The user's decision (2026-10-03): wait, as 2.0.0 did.
+/// Kept under the tasks' own 8 s so the COM thread is free again before the next task is given up on.
+unsafe fn create_automation() -> windows::core::Result<IUIAutomation> {
     unsafe {
-        let automation2: IUIAutomation2 = CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
+        let automation2: IUIAutomation2 = match CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("[uia] CUIAutomation8 is not available: {e} -- UIA acts will move the keyboard focus");
+                return CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+            }
+        };
         if let Err(e) = automation2.SetAutoSetFocus(false) {
             eprintln!("[uia] AutoSetFocus could not be turned off: {e} -- UIA acts will move the keyboard focus");
         }
-        if let Err(e) = automation2.SetConnectionTimeout(ACT_CONNECTION_TIMEOUT_MS) {
-            eprintln!("[uia] ConnectionTimeout could not be set: {e} -- UIA acts give up on a busy window after 2 s");
+        if let Err(e) = automation2.SetConnectionTimeout(CONNECTION_TIMEOUT_MS) {
+            eprintln!("[uia] ConnectionTimeout could not be set: {e} -- UIA gives up on a busy window after 2 s");
         }
         automation2.cast()
     }
 }
 
-/// See `create_act_automation`.
-const ACT_CONNECTION_TIMEOUT_MS: u32 = 7_000;
-
-/// Which of the two clients `build_context` builds (`UiaContexts`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Client {
-    Read,
-    Act,
-}
+/// See `create_automation`.
+const CONNECTION_TIMEOUT_MS: u32 = 7_000;
 
 /// Build persistent COM objects that live for the entire thread lifetime.
-fn build_context(client: Client) -> windows::core::Result<UiaContext> {
+fn build_context() -> windows::core::Result<UiaContext> {
     unsafe {
-        let automation: IUIAutomation = match client {
-            Client::Read => CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?,
-            Client::Act => create_act_automation()?,
-        };
+        let automation = create_automation()?;
 
         let walker = automation.ControlViewWalker()?;
 
@@ -521,7 +516,6 @@ fn build_context(client: Client) -> windows::core::Result<UiaContext> {
             cache_request: cr,
             tree_cache_request: tree_cr,
             control_view_condition: cv_condition,
-            reports_documents_as_edit: client == Client::Act,
         })
     }
 }
