@@ -172,7 +172,8 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
 
 - A Win32 menu item that opens a submenu can still leave the foreground on the invisible system window
   after the window closes.
-- The PowerShell fallback, used when the native engine is unavailable, moves the focus as 2.0 did.
+- The PowerShell fallback, used when the native engine is unavailable, moves the focus as 2.0 did:
+  after the window it acted on closes, the foreground can be left on the invisible system window.
 
 ## [2.0.0] - 2026-09-24 — An action that cannot be done is refused, not reported as done
 
