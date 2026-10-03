@@ -59,9 +59,9 @@ turns that off and moves the focus itself, by roads that do not take the foregro
 - **No deadlock.** After presses and writes on Win32 and WinForms controls, closing the window leaves
   the foreground where it was. In the same runs, 2.1 fell into it 0 times.
 - **Your window and keys stay yours.** The same focus move used to bring a window that was behind to
-  the front, and the keys you were typing went into it. Win32 and WinForms controls, and browser
+  the front, and the keys you were typing went into it. Win32, WinForms and WPF controls, and browser
   pages behind another window, are now acted on without coming to the front. A value written before
-  a press is still committed, as when you click.
+  a press is still committed, as when you click (a ToolStrip button does not commit it, for you either).
 - **A busy window is waited for up to 7 s, then reported as not answering** (`aim_route_failed`),
   and nothing is typed or pressed another way. When it stopped answering mid-act, the `detail` says
   the act may still take effect.
@@ -170,8 +170,6 @@ was replaced as `window_closed`, `target_changed` or `ambiguous_title`.
 
 ### Known limitations
 
-- A WPF window behind another comes to the front when acted on, and keys typed meanwhile can go into
-  it.
 - A Win32 menu item that opens a submenu can still leave the foreground on the invisible system window
   after the window closes.
 - The PowerShell fallback, used when the native engine is unavailable, moves the focus as 2.0 did.

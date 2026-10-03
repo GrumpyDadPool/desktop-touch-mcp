@@ -21,7 +21,7 @@ npx -y @harusame64/desktop-touch-mcp
 
 - **🔁 押したら、何が起きたかが返る** — `desktop_act` は操作の後に、何が変わったかを応答に入れて返します。現れた・消えた要素、モーダル、フォーカスの移動、画面の再描画（`observation`）、`narrate:"rich"` なら変わった値と名前まで。クリックの結果を確かめるために、もう一度スクリーンショットを撮る必要がありません。UIA が効かない対象では、変化した領域だけの PNG も同梱できます（`roiCapture`。見える変化があれば既定で付与、`returnCapture:"never"` で抑止、`"always"` で常時）。
 - **🛑 できない操作は「できた」と言わない** — 指定した欄に届かない入力、ダイアログに塞がれた窓、閉じた窓、別の仮想デスクトップの窓には、何も送らずに断り、理由と次の手を返します。`hwnd` で指した操作は、同じ題名の別の窓には届きません。
-- **🌐 深い窓まで読む（v2.1）** — UI Automation を深さ 64・500 要素まで読みます。2.0 では「読めない」と答えていた Chrome・Edge・VS Code のページ、値が欠けていた Explorer と設定、Word の本文が読めて、操作できます（例: Chrome のページは 6 要素・403 ms → 45 要素・101 ms）。
+- **🌐 深い窓まで読む（v2.1）** — UI Automation を深さ 64・500 要素まで読みます。2.0 では「読めない」と答えていた Chrome・Edge・VS Code のページ、値が欠けていた Explorer と設定、Word の本文が読めて、操作できます（例: Chrome のページは 6 要素・387 ms → 45 要素・186 ms）。
 - **🎯 Set-of-Marks（SoM）ビジュアルフォールバック** — ゲーム・RDP・アクセシビリティの木を持たないアプリなど、UIA が見えない窓でも、`desktop_discover` と `screenshot(detail="text")` が Hybrid Non-CDP パイプラインに切り替えます。Rust 画像前処理 → Windows OCR → クラスタリング → 赤い枠線 + 番号バッジ（`[1]`、`[2]`…）付き PNG を生成し、`clickAt` 座標付きの要素リストを返します。CDP 不要。
 - **⌨️ 裏からの入力が届かない窓にも打つ** — Windows Terminal には毎回利用者に訊いてから貼り付けます（MCP の elicitation に対応したクライアントを stdio で）。Word の本文には、Word が前面でも裏でもキャレット位置に打ちます。
 - **🔐 Key Locker — SSH / sudo のパスワードをターミナルが自動入力** — 認証情報はロッカー自身のセキュアダイアログに一度だけ入力して、この PC 上に暗号化保存（Windows DPAPI）— アシスタントには一切見えません。以後は `key_locker(action='launch_console')` で開いたコンソールで `ssh` / `sudo` を実行するだけで、隠しパスワードプロンプトに自動入力されます（既定では入力毎に確認あり）。詳細は [Key Locker](docs/guide.ja.md#key-locker-ターミナル認証情報の自動入力) 参照。
@@ -338,7 +338,7 @@ mouse_click(x, y, origin?, scale?)    → 最終手段。dotByDot screenshot の
 |---|---|---|
 | ゲーム・動画プレイヤーの背面キャプチャが黒またはハング | DirectX フルスクリーン等は `PW_RENDERFULLCONTENT (flag=2)` でも再描画してくれないことがある。v1.4.4 以降、window-targeted `screenshot(detail='image')` は PrintWindow が何も返さない場合と all-black + zero-variance フレームを返した場合に BitBlt fallback へ自動で切り替わるが、PrintWindow がハングするケースは fallback されない | `screenshot({mode:'background', fullContent:false})` で旧 PrintWindow フラグに切り替え。それでも黒なら default `mode='normal'` の BitBlt fallback が画面の rect を返す (`hints.captureFallbackReason: 'printwindow-all-black'` で識別可能) |
 | UIA 呼び出しのオーバーヘッド | Rust ネイティブ: フォーカス取得 ~2ms、ツリー走査 ~100ms。PowerShell フォールバック: ~300ms | 操作前に `workspace_snapshot` で一括取得し、以降は `diffMode` で差分確認 |
-| Chrome / WinUI3 の UIA 要素が空 | Chromium は UIA を限定的にしか公開しない | `browser_open` + `browser_locate` で DOM ベースのクリックを使用。視覚確認のみなら `screenshot(detail="image")` |
+| `screenshot(detail='text')` で Chrome / WinUI3 の UIA 要素が少ない | この読みは Chromium では浅いまま（`desktop_discover` は 2.1 からページの部品を読む） | ページの部品は `desktop_discover` で。DOM ベースのクリックは `browser_open` + `browser_locate`。視覚確認のみなら `screenshot(detail="image")` |
 | レイヤーバッファの TTL | 90 秒操作なしでバッファが自動クリア → 次回 `diffMode` が I-frame になる | 長い待機後は `workspace_snapshot` で明示的にリセット |
 
 ---
