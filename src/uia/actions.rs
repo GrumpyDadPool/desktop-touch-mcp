@@ -221,6 +221,7 @@ fn failure_text(e: &windows::core::Error) -> String {
 }
 
 fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<ActionResult> {
+    let impl_started = std::time::Instant::now();
     let window = match resolve_root(ctx, opts.hwnd.as_deref(), &opts.window_title) {
         Ok(w) => w,
         Err(e) => {
@@ -357,7 +358,8 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
         // refused. win2 measured that on a WPF read-only ComboBox (2.1.0 dogfood, §9 r1b, 3/3: the
         // focus left DELTA for the combo and stayed; the build before the move left it alone). Such
         // an element is written first, and the focus moves only after a write that read back as taken.
-        let move_first = !said_read_only;
+        // The classic client moves the focus by itself on the write, so it is not deferred there.
+        let move_first = !said_read_only || ctx.classic;
         let mut focused_by = if move_first {
             super::focus_first::move_focus_first(ctx, &elem)
         } else {
@@ -392,8 +394,14 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                     });
                 }
                 // After the read-back, not before it: a focus move that reformats the text would
-                // otherwise read as the write having taken (gate 1 on `f2e3b75f`).
-                if !move_first {
+                // otherwise read as the write having taken (gate 1 on `f2e3b75f`). And not when the
+                // write itself took long: the caller may already have been told the window stopped
+                // answering, and a focus move landing later would surprise it (gate 2 on `f2e3b75f`).
+                // Half the act's limit, as this clock starts after any wait in the thread's queue.
+                if !move_first
+                    && impl_started.elapsed()
+                        < std::time::Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS / 2))
+                {
                     focused_by = super::focus_first::move_focus_first(ctx, &elem);
                 }
                 Ok(ActionResult {
