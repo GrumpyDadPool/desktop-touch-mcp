@@ -98,6 +98,15 @@ async function typeInto(entity: UiEntity, aim: Aim) {
 const aimed: Aim = { kind: "aim", title: "VR-CELL", hwnd: HWND };
 
 describe("the UIA value road, on success", () => {
+  it("records how the focus was moved into the field, and null when the backend does not say (internal #216)", async () => {
+    const entity: UiEntity = { ...base, label: "DELTA", locator: { uia: { name: "DELTA" } } };
+    const { createDesktopExecutor } = await import("../../src/tools/desktop-executor.js");
+    await createDesktopExecutor(aimed, { ...deps(), uiaSetValue: vi.fn(async () => ({ focusedBy: "win32_list" })) })(entity, "type", "PROBE-VR");
+    expect(valueRoadRows().at(-1)).toMatchObject({ route: "uia", focusedBy: "win32_list" });
+    await typeInto(entity, aimed);
+    expect(valueRoadRows().at(-1)?.focusedBy).toBeNull();
+  });
+
   it("records that it was addressed by an automationId — the narrowest the element axis has", async () => {
     const entity: UiEntity = {
       ...base,
@@ -298,6 +307,13 @@ describe("the UIA click road, and its refusals and downgrade", () => {
     const row = allRows().find((r) => r.why === "uia_invoke");
     expect(row).toMatchObject({ route: "uia", addressedWindowBy: "handle", addressedElementBy: "automation_id" });
     expect(row?.addressedBy).toEqual({ automationId: true, name: true });
+  });
+
+  it("writes how the focus was moved before the press, and null when the backend does not say (internal #216)", async () => {
+    await click({ ...button, locator: { uia: { name: "GO" } } }, aimed, { uiaClick: vi.fn(async () => ({ focusedBy: "win32" })) });
+    expect(allRows().find((r) => r.why === "uia_invoke")).toMatchObject({ route: "uia", focusedBy: "win32" });
+    await click({ ...button, locator: { uia: { name: "GO" } } }, aimed, { uiaClick: vi.fn(async () => undefined) });
+    expect(allRows().filter((r) => r.why === "uia_invoke").at(-1)?.focusedBy).toBeNull();
   });
 
   it("writes the axes on a UIA invoke by title and name", async () => {

@@ -459,3 +459,25 @@ describe("ADR-036 — the debt is taken on at the channel, not at the top of the
     expect(mockBuildHints).not.toHaveBeenCalled();
   });
 });
+
+describe("the V1 tools do not grow `focusedBy` (internal #216)", () => {
+  // The engine says how it moved the focus, for desktop_act's probe rows. `click_element` and
+  // `set_element_value` spread the bridge's answer into their replies, so the field is taken out
+  // there: these replies are a public surface and stay as they were.
+  it("set_element_value", async () => {
+    mockSetValue.mockResolvedValue({ ok: true, focusedBy: "win32" } as never);
+    const r = await call();
+    const body = JSON.parse(r.content![0]!.text) as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body).not.toHaveProperty("focusedBy");
+  });
+
+  it("click_element", async () => {
+    const bridge = await import("../../src/engine/uia-bridge.js");
+    vi.mocked(bridge.clickElement).mockResolvedValueOnce({ ok: true, element: "Field", via: "native", focusedBy: "win32" });
+    const r = await clickElementHandler({ windowTitle: TITLE, hwnd: String(LIVE), name: "Field" } as never);
+    const body = JSON.parse(r.content![0]!.text) as Record<string, unknown>;
+    expect(body.ok).toBe(true);
+    expect(body).not.toHaveProperty("focusedBy");
+  });
+});

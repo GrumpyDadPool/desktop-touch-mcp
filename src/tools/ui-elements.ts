@@ -222,7 +222,8 @@ export const clickElementHandler = async ({
     // H3: pass the resolved hwnd so uia-bridge addresses the window through FromHandle() rather
     // than searching for its title — which is what reaches the common dialogs, and (ADR-036)
     // what keeps a same-titled sibling from answering instead.
-    const result = await clickElement(
+    // `focusedBy` (internal #216) is for desktop_act's probe rows; this tool's reply does not change.
+    const { focusedBy: _focusedBy, ...result } = await clickElement(
       effectiveWindowTitle, effectiveName, effectiveAutomationId, controlType,
       resolvedWin ? { hwnd: resolvedWin.hwnd } : undefined,
     );
@@ -681,7 +682,8 @@ export const setElementValueHandler = async ({
     // Channel 1 is aimed at the handle — the bridge addresses it through `FromHandle` — so the
     // debt names the handle (ADR-036).
     observationOwedFor = { title: effectiveTitle, ...(resolvedWin && { hwnd: resolvedWin.hwnd }) };
-    const r1 = await setElementValue(
+    // `focusedBy` (internal #216) is for desktop_act's probe rows; this tool's reply does not change.
+    const { focusedBy: _focusedBy, ...r1 } = await setElementValue(
       effectiveTitle, value, name, automationId,
       resolvedWin ? { hwnd: resolvedWin.hwnd } : undefined,
     );

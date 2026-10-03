@@ -171,6 +171,28 @@ beforeEach(() => {
   unambiguous();
 });
 
+describe("the engine says how it moved the focus, and only the engine (internal #216)", () => {
+  it("a click and a value write pass the engine's answer through", async () => {
+    h.native.click = { ok: true, element: "OK", error: null, code: null, focusedBy: "win32" };
+    expect(await clickElement("Untitled - Notepad", "OK")).toMatchObject({ ok: true, focusedBy: "win32", via: "native" });
+    h.native.setValue = { ok: true, error: null, code: null, focusedBy: "uia" };
+    expect(await setElementValue("Untitled - Notepad", "hello", "Text")).toMatchObject({ ok: true, focusedBy: "uia" });
+  });
+
+  it("says nothing when the engine said nothing", async () => {
+    h.native.click = { ok: true, element: "OK", error: null, code: null, focusedBy: null };
+    expect(await clickElement("Untitled - Notepad", "OK")).not.toHaveProperty("focusedBy");
+    h.native.setValue = { ok: true, error: null, code: null };
+    expect(await setElementValue("Untitled - Notepad", "hello", "Text")).not.toHaveProperty("focusedBy");
+  });
+
+  it("the PowerShell road has no focus step, so it names none", async () => {
+    h.native.clickThrows = true;
+    h.psOutput = '{"ok":true,"element":"OK"}';
+    expect(await clickElement("Untitled - Notepad", "OK")).not.toHaveProperty("focusedBy");
+  });
+});
+
 describe("each answer says which client gave it (ADR-036 item 16, gate 2 on #624)", () => {
   // The two clients can see different trees and name one element differently, so a click's
   // "not found" is weighed by who read the element and who looked for it.

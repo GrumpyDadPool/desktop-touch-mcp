@@ -132,9 +132,10 @@ export interface ExecutorDeps {
    * answering to the same title cannot take the action. Trailing and optional so a backend
    * (or a test double) that ignores it still satisfies the interface.
    */
-  uiaClick(windowTitle: string, name?: string, automationId?: string, hwnd?: bigint): Promise<void>;
+  /** Resolves with how the focus was moved to the element before the press, when the backend says (internal #216). */
+  uiaClick(windowTitle: string, name?: string, automationId?: string, hwnd?: bigint): Promise<{ focusedBy?: string } | void>;
   /** UIA ValuePattern: type text into a textbox. `hwnd` as in {@link ExecutorDeps.uiaClick}. */
-  uiaSetValue(windowTitle: string, value: string, name?: string, automationId?: string, hwnd?: bigint): Promise<void>;
+  uiaSetValue(windowTitle: string, value: string, name?: string, automationId?: string, hwnd?: bigint): Promise<{ focusedBy?: string } | void>;
   /** CDP: click a DOM element by CSS selector. */
   cdpClick(selector: string, tabId?: string): Promise<void>;
   /** CDP: fill a text input by CSS selector.
@@ -2504,7 +2505,7 @@ export function createDesktopExecutor(
       // error message so the LLM sees both rungs' diagnostics in one envelope.
       if ((action === "type" || action === "setValue") && text !== undefined) {
         try {
-          await d.uiaSetValue(winTitle, text, name, automationId, aimHwnd);
+          const written = await d.uiaSetValue(winTitle, text, name, automationId, aimHwnd);
           // ADR-036 family 2, observation only — WHAT THIS CALL ADDRESSED BY.
           //
           // Measured on 2026-09-15 (win2, internal#106 round): a title-only act down this road
@@ -2576,6 +2577,8 @@ export function createDesktopExecutor(
           // `grep -rn --exclude=desktop-executor.ts 'source: "uia"' src/`.
           probeRoute("uia", aimHwnd, entity, {
             why: "uia_set_value",
+            // internal #216 — how the focus was moved into the field before the write.
+            focusedBy: written?.focusedBy ?? null,
             // What the call CARRIED at the element. The predicates are truthiness, not
             // `!== undefined`, because an empty string is not an address.
             //
@@ -2746,8 +2749,8 @@ export function createDesktopExecutor(
         }
       }
       try {
-        await d.uiaClick(winTitle, name, automationId, aimHwnd);
-        probeRoute("uia", aimHwnd, entity, { why: "uia_invoke", addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
+        const pressed = await d.uiaClick(winTitle, name, automationId, aimHwnd);
+        probeRoute("uia", aimHwnd, entity, { why: "uia_invoke", focusedBy: pressed?.focusedBy ?? null, addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
         return "uia";
       } catch (uiaErr) {
         // R3 tool-exclusion — a refusal is not a failure to route around. Every other throw
@@ -3175,6 +3178,7 @@ function getSharedRealDeps(): ExecutorDeps {
       // Which client answered, carried on the error: item 16 believes a "not found" only from the
       // native client, about an entity the native client read.
       if (!r.ok) throw Object.assign(new Error(r.error ?? "UIA click failed"), { uiaVia: r.via });
+      return r.focusedBy !== undefined ? { focusedBy: r.focusedBy } : undefined;
     },
 
     async uiaSetValue(windowTitle, value, name, automationId, hwnd) {
@@ -3187,6 +3191,7 @@ function getSharedRealDeps(): ExecutorDeps {
       // Which client answered, carried on the error as `uiaClick` carries it: the type road's item 16
       // believes a "not found" only from the native client, about an entity the native client read.
       if (!r.ok) throw Object.assign(new Error(r.error ?? "UIA setElementValue failed"), { uiaVia: r.via });
+      return r.focusedBy !== undefined ? { focusedBy: r.focusedBy } : undefined;
     },
 
     async cdpClick(selector, tabId) {

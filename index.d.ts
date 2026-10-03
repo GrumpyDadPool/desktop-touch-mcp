@@ -115,6 +115,7 @@ export interface NativeActionResult {
   element?: string | null
   error?: string | null
   code?: string | null
+  focusedBy?: string | null
 }
 
 // ─── Element bounds ──────────────────────────────────────────────────────────

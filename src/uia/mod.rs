@@ -12,6 +12,7 @@
 pub(crate) mod actions;
 pub(crate) mod event_handlers;
 pub(crate) mod focus;
+pub(crate) mod focus_first;
 pub(crate) mod scroll;
 pub(crate) mod tabs;
 pub(crate) mod text;

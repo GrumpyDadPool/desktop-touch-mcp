@@ -109,6 +109,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                 element: None,
                 error: Some(e.reason),
                 code,
+                focused_by: None,
             });
         }
     };
@@ -127,6 +128,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                 element: None,
                 error: Some(e.reason),
                 code: None,
+                focused_by: None,
             });
         }
     };
@@ -143,6 +145,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
             element: None,
             error: Some("Element is disabled".into()),
             code: Some("ElementDisabled".into()),
+            focused_by: None,
         });
     }
 
@@ -156,6 +159,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                     element: None,
                     error: Some("InvokePattern not supported by this element".into()),
                     code: Some("PatternNotSupported".into()),
+                    focused_by: None,
                 });
             }
         };
@@ -167,6 +171,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                     element: None,
                     error: Some("InvokePattern cast failed".into()),
                     code: Some("PatternNotSupported".into()),
+                    focused_by: None,
                 });
             }
         };
@@ -174,18 +179,25 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
         // Read before the press: a Close or an OK that destroys itself answers nothing afterwards.
         let name = elem.CurrentName().map(|b| b.to_string()).unwrap_or_default();
 
+        // Internal #216 — the client does not move the focus any more (`thread.rs`); a press is where
+        // the field the caller wrote before gives up the focus, which is when an application commits
+        // it, so the focus moves to what is pressed first (`focus_first.rs`).
+        let focused_by = super::focus_first::move_focus_first(ctx, &elem);
+
         match invoke.Invoke() {
             Ok(()) => Ok(ActionResult {
                 ok: true,
                 element: Some(name),
                 error: None,
                 code: None,
+                focused_by: Some(focused_by.into()),
             }),
             Err(e) => Ok(ActionResult {
                 ok: false,
                 element: None,
                 error: Some(format!("{e}")),
                 code: None,
+                focused_by: Some(focused_by.into()),
             }),
         }
     }
@@ -201,6 +213,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some(e.reason),
                 code,
+                focused_by: None,
             });
         }
     };
@@ -219,6 +232,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some(e.reason),
                 code: None,
+                focused_by: None,
             });
         }
     };
@@ -232,6 +246,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                     element: None,
                     error: Some("ValuePattern not supported by this element".into()),
                     code: Some("PatternNotSupported".into()),
+                    focused_by: None,
                 });
             }
         };
@@ -243,6 +258,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                     element: None,
                     error: Some("ValuePattern cast failed".into()),
                     code: Some("PatternNotSupported".into()),
+                    focused_by: None,
                 });
             }
         };
@@ -259,6 +275,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some("Element is disabled".into()),
                 code: Some("ElementDisabled".into()),
+                focused_by: None,
             });
         }
 
@@ -289,6 +306,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some("Value is read-only".into()),
                 code: Some("ElementReadOnly".into()),
+                focused_by: None,
             });
         }
 
@@ -316,6 +334,10 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
         } else {
             None
         };
+        // Internal #216 — into the field before writing, as a person would, by a road that does not
+        // raise the fall (`focus_first.rs`); the press that follows takes it away again, which is
+        // when the application commits the value.
+        let focused_by = super::focus_first::move_focus_first(ctx, &elem);
         let bstr = windows::core::BSTR::from(&*opts.value);
         match vp.SetValue(&bstr) {
             Ok(()) => {
@@ -336,6 +358,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                             "SetValue returned success, but the element's value read back unchanged for {NOT_APPLIED_SETTLE_MS} ms after it"
                         )),
                         code: Some("ValueNotApplied".into()),
+                        focused_by: Some(focused_by.into()),
                     });
                 }
                 Ok(ActionResult {
@@ -343,6 +366,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                     element: None,
                     error: None,
                     code: None,
+                    focused_by: Some(focused_by.into()),
                 })
             }
             // A write that failed on an element that said read-only is named read-only, in words
@@ -352,12 +376,14 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                 element: None,
                 error: Some("Value is read-only".into()),
                 code: Some("ElementReadOnly".into()),
+                focused_by: Some(focused_by.into()),
             }),
             Err(e) => Ok(ActionResult {
                 ok: false,
                 element: None,
                 error: Some(format!("{e}")),
                 code: None,
+                focused_by: Some(focused_by.into()),
             }),
         }
     }
@@ -402,6 +428,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 element: None,
                 error: Some(e.reason),
                 code,
+                focused_by: None,
             });
         }
     };
@@ -420,6 +447,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 element: None,
                 error: Some(e.reason),
                 code: None,
+                focused_by: None,
             });
         }
     };
@@ -431,6 +459,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
             element: None,
             error: Some("Element is disabled".into()),
             code: Some("ElementDisabled".into()),
+            focused_by: None,
         });
     }
 
@@ -454,6 +483,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                     element: None,
                     error: Some("TextPattern2 cast failed".into()),
                     code: Some("TextPattern2NotSupported".into()),
+                    focused_by: None,
                 })
             }
             Err(_) => Ok(ActionResult {
@@ -461,6 +491,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 element: None,
                 error: Some("TextPattern2 not supported by this element".into()),
                 code: Some("TextPattern2NotSupported".into()),
+                focused_by: None,
             }),
         }
     }

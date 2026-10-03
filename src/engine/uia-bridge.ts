@@ -1813,7 +1813,7 @@ export async function clickElement(
   controlType?: string,
   /** (H3) When hwnd is provided, bypass title-based root search (fixes Save As / common dialogs). */
   options?: { hwnd?: bigint }
-): Promise<{ ok: boolean; element?: string; error?: string; code?: string; via?: "native" | "powershell" }> {
+): Promise<{ ok: boolean; element?: string; error?: string; code?: string; via?: "native" | "powershell"; focusedBy?: string }> {
   refuseUiaTitleIfExcluded(windowTitle, options?.hwnd);
   if (options?.hwnd !== undefined) refuseUiaHwndIfExcluded(options.hwnd);
   // ADR-036 — on the WRITE path a handle is authoritative and is never traded for a title.
@@ -1850,6 +1850,9 @@ export async function clickElement(
         error: result.error ?? undefined,
         code: result.code ?? undefined,
         via: "native",
+        // internal #216 — how the focus was moved to the element before the press (`focus_first.rs`).
+        // The PowerShell road below has no such step: the managed client moves it itself.
+        ...(result.focusedBy ? { focusedBy: result.focusedBy } : {}),
       };
     } catch (e) {
       console.warn("[uia-bridge] Native uiaClickElement failed, falling back to PowerShell:", e);
@@ -1872,7 +1875,7 @@ export async function setElementValue(
   automationId?: string,
   /** (H3) When hwnd is provided, bypass title-based root search (fixes Save As / common dialogs). */
   options?: { hwnd?: bigint }
-): Promise<{ ok: boolean; error?: string; code?: string; via?: "native" | "powershell" }> {
+): Promise<{ ok: boolean; error?: string; code?: string; via?: "native" | "powershell"; focusedBy?: string }> {
   refuseUiaTitleIfExcluded(windowTitle, options?.hwnd);
   if (options?.hwnd !== undefined) refuseUiaHwndIfExcluded(options.hwnd);
   // A handle is authoritative here too — see `clickElement` above for why the read half's gate
@@ -1888,7 +1891,8 @@ export async function setElementValue(
       });
       // `via` on a failure only: item 16 weighs a "not found" by it, and a success has nothing to
       // weigh — V1 `set_element_value` spreads this object into its reply, and gains no field.
-      return { ok: result.ok, error: result.error ?? undefined, code: result.code ?? undefined, ...(!result.ok && { via: "native" as const }) };
+      // internal #216 — `focusedBy` as in `clickElement`. V1 `set_element_value` drops it from its reply.
+      return { ok: result.ok, error: result.error ?? undefined, code: result.code ?? undefined, ...(!result.ok && { via: "native" as const }), ...(result.focusedBy ? { focusedBy: result.focusedBy } : {}) };
     } catch (e) {
       console.warn("[uia-bridge] Native uiaSetValue failed, falling back to PowerShell:", e);
     }
