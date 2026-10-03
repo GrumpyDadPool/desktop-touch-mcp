@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.1.0] - 2026-10-xx — Deeper UI Automation reads: more to see and more to act on. Acts no longer deadlock the mouse and window switching
+## [2.1.0] - 2026-10-04 — Deeper UI Automation reads: more to see and more to act on. Acts no longer deadlock the mouse and window switching
 
 Two changes. `desktop_discover`'s UI Automation read used to stop at depth 4, and now goes to
 depth 64 and stops at 500 elements: browsers, Electron apps, Explorer, Settings and Word keep their
