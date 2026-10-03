@@ -663,7 +663,7 @@ fn matches_with_ct(
 
     let ct_ok = match ct_lower {
         Some(target) => unsafe {
-            elem.CachedControlType()
+            super::cached_control_type(elem)
                 .map(|id| {
                     super::control_type_name(id)
                         .to_lowercase()

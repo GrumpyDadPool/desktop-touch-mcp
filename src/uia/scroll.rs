@@ -844,9 +844,7 @@ fn walk_scroll_ancestors(
                     .CurrentAutomationId()
                     .map(|b| b.to_string())
                     .unwrap_or_default();
-                let ct_id = parent
-                    .CurrentControlType()
-                    .unwrap_or(UIA_CustomControlTypeId);
+                let ct_id = super::current_control_type(&parent).unwrap_or(UIA_CustomControlTypeId);
                 let ct = control_type_name(ct_id).to_string();
 
                 let vp = scroll.CurrentVerticalScrollPercent().unwrap_or(-1.0);

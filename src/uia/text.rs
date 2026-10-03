@@ -131,9 +131,7 @@ unsafe fn try_text_pattern(
         let range = tp.DocumentRange().ok()?;
         let text = range.GetText(-1).ok()?;
 
-        let ct_id = elem
-            .CurrentControlType()
-            .unwrap_or(UIA_CustomControlTypeId);
+        let ct_id = super::current_control_type(&elem).unwrap_or(UIA_CustomControlTypeId);
         let ct_name = control_type_name(ct_id);
         let score = score_ct(ct_name);
 

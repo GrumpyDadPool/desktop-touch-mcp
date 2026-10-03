@@ -23,6 +23,63 @@ pub(crate) mod vdesktop;
 
 use windows::Win32::UI::Accessibility::*;
 
+/// internal #216 — the control type this engine reports for an element: the type UI Automation
+/// answers, except that a `Document` that is a window of its own and takes a value is reported as the
+/// `Edit` it was.
+///
+/// The client became `CUIAutomation8` so that `AutoSetFocus` could be turned off (`thread.rs`), and
+/// that class reads some Win32 text controls differently. MEASURED win2 2026-10-03 (internal
+/// `dev/v210-dogfood`, `RESULTS-R18b.md`, plain UIA with both classes side by side): Notepad's text
+/// area and a WinForms RichTextBox are `Edit` to the old class and `Document` to the new one — each a
+/// window of its own, with `ValuePattern` and `IsReadOnly` false. Everything here and in the server
+/// that tells a text field from a page reads `Edit` (discover's role and actions, the keyboard rung,
+/// the click road's type filter), so Notepad stopped being offered `type`. Unchanged between the
+/// classes and kept as `Document`: a WinForms multi-line TextBox (`Edit` both), Chrome's page
+/// (`Document` both, no window of its own, a read-only value) and Word's `_WwG` (`Document` both, a
+/// window of its own but no `ValuePattern`).
+pub(crate) fn reported_control_type(
+    id: UIA_CONTROLTYPE_ID,
+    own_window: bool,
+    takes_value: bool,
+) -> UIA_CONTROLTYPE_ID {
+    if id == UIA_DocumentControlTypeId && own_window && takes_value {
+        UIA_EditControlTypeId
+    } else {
+        id
+    }
+}
+
+/// [`reported_control_type`] from the element's cache: the type, the handle and the value pattern
+/// are all in both cache requests (`thread.rs::configure_cache_properties`).
+pub(crate) unsafe fn cached_control_type(
+    elem: &IUIAutomationElement,
+) -> windows::core::Result<UIA_CONTROLTYPE_ID> {
+    unsafe {
+        let id = elem.CachedControlType()?;
+        if id != UIA_DocumentControlTypeId {
+            return Ok(id);
+        }
+        let own = elem.CachedNativeWindowHandle().is_ok_and(|h| !h.0.is_null());
+        let value = elem.GetCachedPattern(UIA_ValuePatternId).is_ok();
+        Ok(reported_control_type(id, own, value))
+    }
+}
+
+/// [`reported_control_type`] read live, for the roads that hold an element with no cache.
+pub(crate) unsafe fn current_control_type(
+    elem: &IUIAutomationElement,
+) -> windows::core::Result<UIA_CONTROLTYPE_ID> {
+    unsafe {
+        let id = elem.CurrentControlType()?;
+        if id != UIA_DocumentControlTypeId {
+            return Ok(id);
+        }
+        let own = elem.CurrentNativeWindowHandle().is_ok_and(|h| !h.0.is_null());
+        let value = elem.GetCurrentPattern(UIA_ValuePatternId).is_ok();
+        Ok(reported_control_type(id, own, value))
+    }
+}
+
 /// Map `UIA_*_CONTROL_TYPE_ID` to the human-readable name
 /// (matching PowerShell/TS conventions).
 #[allow(non_upper_case_globals)]
@@ -70,5 +127,31 @@ pub(crate) fn control_type_name(id: UIA_CONTROLTYPE_ID) -> &'static str {
         UIA_SemanticZoomControlTypeId => "SemanticZoom",
         UIA_AppBarControlTypeId => "AppBar",
         _ => "Unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reported_control_type;
+    use windows::Win32::UI::Accessibility::*;
+
+    #[test]
+    fn a_windowed_document_that_takes_a_value_is_the_edit_it_was() {
+        // Notepad's text area, a WinForms RichTextBox (win2, R18b).
+        assert_eq!(reported_control_type(UIA_DocumentControlTypeId, true, true), UIA_EditControlTypeId);
+    }
+
+    #[test]
+    fn a_page_and_words_body_stay_documents() {
+        // Chrome's page: no window of its own.
+        assert_eq!(reported_control_type(UIA_DocumentControlTypeId, false, true), UIA_DocumentControlTypeId);
+        // Word's `_WwG`: a window of its own, no value pattern.
+        assert_eq!(reported_control_type(UIA_DocumentControlTypeId, true, false), UIA_DocumentControlTypeId);
+    }
+
+    #[test]
+    fn other_types_are_untouched() {
+        assert_eq!(reported_control_type(UIA_EditControlTypeId, true, true), UIA_EditControlTypeId);
+        assert_eq!(reported_control_type(UIA_PaneControlTypeId, true, true), UIA_PaneControlTypeId);
     }
 }

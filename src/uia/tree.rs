@@ -159,7 +159,7 @@ fn get_elements_impl(ctx: &UiaContext, opts: &GetElementsOptions) -> napi::Resul
 
             // internal #211 (B) — the index among ALL the parent's ControlView children, offscreen
             // ones included, so a sibling scrolling out of view does not renumber the rest.
-            let path = match (&parent_path, unsafe { child.CachedControlType() }) {
+            let path = match (&parent_path, unsafe { super::cached_control_type(&child) }) {
                 (Some(p), Ok(t)) => Some(format!("{p}/{}[{i}]", control_type_name(t))),
                 _ => None,
             };
@@ -393,7 +393,8 @@ fn extract_element(
 ) -> windows::core::Result<UiElement> {
     unsafe {
         let name = elem.CachedName().map(|b| b.to_string()).unwrap_or_default();
-        let control_type_id = elem.CachedControlType()?;
+        // internal #216 — `Edit` for the text controls the new client calls `Document` (`mod.rs`).
+        let control_type_id = super::cached_control_type(elem)?;
         let control_type = control_type_name(control_type_id).to_string();
         let automation_id = elem
             .CachedAutomationId()
@@ -594,9 +595,7 @@ fn get_element_bounds_impl(
             .CurrentName()
             .map(|b| b.to_string())
             .unwrap_or_default();
-        let ct_id = elem
-            .CurrentControlType()
-            .unwrap_or(UIA_CustomControlTypeId);
+        let ct_id = super::current_control_type(&elem).unwrap_or(UIA_CustomControlTypeId);
         let control_type = control_type_name(ct_id).to_string();
         let automation_id = elem
             .CurrentAutomationId()
