@@ -356,7 +356,7 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
         // its write usually fails, and the move would leave the focus on a control the act then
         // refused. win2 measured that on a WPF read-only ComboBox (2.1.0 dogfood, §9 r1b, 3/3: the
         // focus left DELTA for the combo and stayed; the build before the move left it alone). Such
-        // an element is written first, and the focus moves only after a write that took.
+        // an element is written first, and the focus moves only after a write that read back as taken.
         let move_first = !said_read_only;
         let mut focused_by = if move_first {
             super::focus_first::move_focus_first(ctx, &elem)
@@ -371,9 +371,6 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
         let bstr = windows::core::BSTR::from(&*opts.value);
         match vp.SetValue(&bstr) {
             Ok(()) => {
-                if !move_first {
-                    focused_by = super::focus_first::move_focus_first(ctx, &elem);
-                }
                 let read = || vp.CurrentValue().ok().map(|b| b.to_string());
                 let mut after = before.as_ref().and_then(|_| read());
                 let started = std::time::Instant::now();
@@ -393,6 +390,11 @@ fn set_value_impl(ctx: &UiaContext, opts: &SetValueOptions) -> napi::Result<Acti
                         code: Some("ValueNotApplied".into()),
                         focused_by: Some(focused_by.into()),
                     });
+                }
+                // After the read-back, not before it: a focus move that reformats the text would
+                // otherwise read as the write having taken (gate 1 on `f2e3b75f`).
+                if !move_first {
+                    focused_by = super::focus_first::move_focus_first(ctx, &elem);
                 }
                 Ok(ActionResult {
                     ok: true,
