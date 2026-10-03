@@ -164,7 +164,7 @@ pub struct ActionResult {
     pub error: Option<String>,
     pub code: Option<String>,
     /// A click or a value write only: how the keyboard focus was moved to the element before it
-    /// acted (`focus_first.rs`) — `"win32"`, `"win32_list"`, `"uia"`, `"already"`, `"skipped"`, `"kept_behind"`,
+    /// acted (`focus_first.rs`) — `"win32"`, `"win32_list"`, `"uia"`, `"already"`, `"skipped"`, `"kept_behind"`, `"legacy_takefocus"`,
     /// `"not_answering"`, `"attach_failed"` or `"failed"` (internal #216). `None` when the act never
     /// got that far.
     pub focused_by: Option<String>,

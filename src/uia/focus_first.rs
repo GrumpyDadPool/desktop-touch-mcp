@@ -24,8 +24,16 @@
 //!   moving it took the foreground 3/3 and the front window received 23–26 keys; not moving it kept
 //!   the foreground 3/3, all 200 arrived, and the page still committed (its `input` and `change`
 //!   fire on the write itself, model new 3/3). WPF lost its commit the same way (a LostFocus binding
-//!   saved the old value 3/3), so WPF keeps the move until a road that commits without the
-//!   foreground is found. The user's decision (2026-10-03).
+//!   saved the old value 3/3), so WPF is taken another way, below. The user's decision (2026-10-03).
+//! - **WPF behind another window** (`"legacy_takefocus"`): `LegacyIAccessible.Select(SELFLAG_TAKEFOCUS)`
+//!   instead of UI Automation's `SetFocus`. MEASURED win2 2026-10-03 (`RESULTS-R23b.md`, plain UIA,
+//!   the same key-counting window in front): taking the focus this way into the field, writing, then
+//!   taking it into Save and pressing kept the foreground, all 200 keys arrived and the LostFocus
+//!   binding saved the new value, 3/3; UI Automation's `SetFocus` took the foreground (33–35 keys)
+//!   and, there, still saved the old one. Taking it into Save alone did not commit — the field never
+//!   had the focus — which is why the write takes it into the field first. In front, WPF keeps UI
+//!   Automation's `SetFocus` (measured, R17a-2); this road was measured behind only. When the
+//!   pattern is missing or refuses, a WPF element behind is left where it is (`"kept_behind"`).
 //! - **Anything else is left where it is** (`"skipped"`): a Win32 or WinForms element with no window
 //!   of its own (a toolbar or ToolStrip button, a tree item, a tab, a grid cell, a menu item), and
 //!   every framework not measured. UI Automation's `SetFocus` is the very call that raised the fall
@@ -67,6 +75,7 @@ pub(crate) const ALREADY: &str = "already";
 pub(crate) const NOT_ANSWERING: &str = "not_answering";
 pub(crate) const SKIPPED: &str = "skipped";
 pub(crate) const KEPT_BEHIND: &str = "kept_behind";
+pub(crate) const BY_LEGACY_TAKEFOCUS: &str = "legacy_takefocus";
 pub(crate) const ATTACH_FAILED: &str = "attach_failed";
 pub(crate) const FAILED: &str = "failed";
 
@@ -98,9 +107,23 @@ pub(crate) fn move_focus_first(ctx: &UiaContext, elem: &IUIAutomationElement) ->
         if framework == "Chrome" && !window_is_in_front(ctx, elem) {
             return KEPT_BEHIND;
         }
+        if framework == "WPF" && !window_is_in_front(ctx, elem) {
+            return legacy_take_focus(elem);
+        }
         match elem.SetFocus() {
             Ok(()) => BY_UIA,
             Err(_) => FAILED,
+        }
+    }
+}
+
+/// `LegacyIAccessible.Select(SELFLAG_TAKEFOCUS)`: the provider moves its own focus, and the foreground
+/// is not asked for (R23b). Without the pattern, or when it refuses, nothing is moved.
+unsafe fn legacy_take_focus(elem: &IUIAutomationElement) -> &'static str {
+    unsafe {
+        match elem.GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(UIA_LegacyIAccessiblePatternId) {
+            Ok(legacy) if legacy.Select(SELFLAG_TAKEFOCUS as i32).is_ok() => BY_LEGACY_TAKEFOCUS,
+            _ => KEPT_BEHIND,
         }
     }
 }
