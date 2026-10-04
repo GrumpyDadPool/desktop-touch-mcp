@@ -11,8 +11,15 @@ import { describeShortExtraction, readZipFileNames } from "../../bin/launcher.js
 // and what goes to stderr. The exit is always 0, as it was in #208. Like Node's
 // execFile, it fails once stderr outgrows the caller's maxBuffer (1 MiB unless
 // set), which is how #208 surfaced as "stderr maxBuffer length exceeded".
+// The zip the launcher picks on this machine (Mac port: Apple Silicon Macs get the macOS zip).
+const ASSET = process.platform === "darwin" && process.arch === "arm64"
+  ? "desktop-touch-mcp-macos-arm64.zip"
+  : "desktop-touch-mcp-windows.zip";
+
 const extractor = vi.hoisted(() => ({
   run: async (_destination: string): Promise<string> => "",
+  /** The extractor the launcher ran, as [command, ...args] (Mac port: unzip on macOS). */
+  calls: [] as string[][],
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -20,11 +27,12 @@ vi.mock("node:child_process", async (importOriginal) => {
   return {
     ...actual,
     execFile: (
-      _command: string,
+      command: string,
       args: string[],
       options: { maxBuffer?: number },
       callback: (error: Error | null, stdout: string, stderr: string) => void,
     ) => {
+      extractor.calls.push([command, ...args]);
       const maxBuffer = options?.maxBuffer ?? 1024 * 1024;
       extractor.run(args[args.length - 1]).then(
         (stderr) =>
@@ -139,7 +147,7 @@ describe("describeShortExtraction", () => {
     expect(longDir.length).toBe(160);
     expect(message).toBe(
       [
-        `Extracting desktop-touch-mcp-windows.zip under ${longRoot} left 0 of 2 files.`,
+        `Extracting ${ASSET} under ${longRoot} left 0 of 2 files.`,
         "Its longest file comes to 270 characters there, and Windows refuses a path over 259 characters " +
           "unless long paths are enabled. Set DESKTOP_TOUCH_MCP_HOME to a directory at least 11 characters " +
           `shorter than ${longRoot}.`,
@@ -155,7 +163,7 @@ describe("describeShortExtraction", () => {
       extractDir: "C:\\u\\download-AbCdEf\\extract",
       stderr: "",
     });
-    expect(message).toBe("Extracting desktop-touch-mcp-windows.zip under C:\\u left 1 of 2 files.");
+    expect(message).toBe(`Extracting ${ASSET} under C:\\u left 1 of 2 files.`);
   });
 
   it("keeps the end of the extractor's stderr, where the real cause is", () => {
@@ -227,7 +235,7 @@ describe("installing a release counts what the extractor left", () => {
           ? new Response(
               JSON.stringify({
                 tag_name: tagName,
-                assets: [{ name: "desktop-touch-mcp-windows.zip", browser_download_url: "https://example.test/z" }],
+                assets: [{ name: ASSET, browser_download_url: "https://example.test/z" }],
               }),
             )
           : new Response(zip),
@@ -242,6 +250,24 @@ describe("installing a release counts what the extractor left", () => {
     const dir = path.join(home, "releases", tagName);
     await expect(result).resolves.toBe(dir);
     expect(existsSync(path.join(dir, "node_modules", "a", "b.js"))).toBe(true);
+  });
+
+  // Mac port (gate 2, #785): which extractor runs is part of the contract — unzip on macOS (keeps
+  // node_modules/.bin symlinks, adds no quarantine), PowerShell's Expand-Archive on Windows.
+  it("extracts with this platform's extractor", async () => {
+    extractor.calls.length = 0;
+    extractOnly(NAMES);
+    const { result } = await install();
+    await result;
+    const [command, ...args] = extractor.calls.at(-1) ?? [];
+    if (process.platform === "darwin") {
+      expect(command).toBe("unzip");
+      expect(args.slice(0, 2)).toEqual(["-q", "-o"]);
+      expect(args.at(-2)).toBe("-d");
+    } else {
+      expect(["powershell.exe", "pwsh.exe"]).toContain(command);
+      expect(args.join(" ")).toContain("Expand-Archive");
+    }
   });
 
   it("refuses an extraction that kept dist/index.js but lost other files", async () => {
@@ -264,7 +290,7 @@ describe("installing a release counts what the extractor left", () => {
     const { tagName, result } = await install(Buffer.from("not a zip the launcher can read"));
     await expect(result).resolves.toBe(path.join(home, "releases", tagName));
     expect(errors.mock.calls.map((call) => String(call[0]))).toContain(
-      "[desktop-touch-mcp] WARNING: Could not read the file list in desktop-touch-mcp-windows.zip; " +
+      `[desktop-touch-mcp] WARNING: Could not read the file list in ${ASSET}; ` +
         "installing without checking that every file was extracted.",
     );
   });

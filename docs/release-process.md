@@ -3,7 +3,9 @@
 This project uses a hybrid distribution model:
 
 - npm publishes a lightweight launcher package: `@harusame64/desktop-touch-mcp`
-- GitHub Releases publish the real Windows runtime zip: `desktop-touch-mcp-windows.zip`
+- GitHub Releases publish the real runtime zips: `desktop-touch-mcp-windows.zip`, and since the Mac port
+  `desktop-touch-mcp-macos-arm64.zip` (Apple Silicon, "macOS preview"; release.yml `macos-release`
+  builds it after the Windows zip)
 
 Users run:
 
@@ -12,9 +14,10 @@ npx -y @harusame64/desktop-touch-mcp
 ```
 
 On first run, the npm launcher resolves the runtime by npm package version.
-For package `X.Y.Z`, it fetches GitHub Release tag `vX.Y.Z`, verifies
-`desktop-touch-mcp-windows.zip` with SHA256, then extracts it under
-`%USERPROFILE%\.desktop-touch-mcp` and starts `dist/index.js`.
+For package `X.Y.Z`, it fetches GitHub Release tag `vX.Y.Z`, verifies the zip for
+its platform (`desktop-touch-mcp-windows.zip` on Windows, `desktop-touch-mcp-macos-arm64.zip` on an
+Apple Silicon Mac) against that zip's own SHA256, then extracts it under
+`%USERPROFILE%\.desktop-touch-mcp` (`~/.desktop-touch-mcp` on macOS) and starts `dist/index.js`.
 
 ## Safety Rules
 
@@ -297,7 +300,13 @@ The release must include:
 
 ```text
 desktop-touch-mcp-windows.zip
+desktop-touch-mcp-macos-arm64.zip
 ```
+
+`RELEASE_MANIFEST.sha256` holds one entry per zip, and the `npm-publish` job (which waits for both
+zip jobs) downloads each zip, checks its contents and sets its entry with
+`node scripts/update-sha.mjs <asset> <sha256>`. The manual route below is for when that job cannot
+run; do it once per zip.
 
 After the zip is available, compute SHA256 and update `bin/launcher.js` `RELEASE_MANIFEST.sha256`:
 
@@ -313,7 +322,7 @@ Remove-Item $out -Force
 Then set:
 
 - `RELEASE_MANIFEST.tagName = "v0.11.4"`
-- `RELEASE_MANIFEST.sha256 = "<hash>"`
+- each `RELEASE_MANIFEST.sha256["<asset>.zip"] = "<hash>"` (`node scripts/update-sha.mjs <asset>.zip <hash>`)
 
 Re-run preflight:
 
@@ -487,6 +496,23 @@ Expected stdout includes:
 ```json
 "serverInfo":{"name":"desktop-touch","version":"X.Y.Z"}
 ```
+
+## macOS npx Smoke Test (Mac port)
+
+On an Apple Silicon Mac, after npm publish, from a directory outside the source tree:
+
+```bash
+rm -rf ~/.desktop-touch-mcp/releases/vX.Y.Z
+cd /tmp && npx -y @harusame64/desktop-touch-mcp@X.Y.Z --help
+```
+
+Expected: `[desktop-touch-mcp] Downloading desktop-touch-mcp-macos-arm64.zip from vX.Y.Z`, then
+`desktop-touch-mcp vX.Y.Z (macOS preview)` and exit 0. Then the MCP smoke against the installed
+release: copy `scripts/smoke-macos.mjs` into `~/.desktop-touch-mcp/releases/vX.Y.Z/` and run
+`node smoke.mjs` there — four tools, and `desktop_state` reads (or answers `PermissionRequired` on a
+Mac without the grant). The addon must carry no `com.apple.quarantine` attribute
+(`xattr ~/.desktop-touch-mcp/releases/vX.Y.Z/desktop-touch-engine.darwin-arm64.node` prints nothing):
+a quarantined, un-notarized addon is refused by Gatekeeper.
 
 ## npx Download & HTTP Smoke Test
 
@@ -730,6 +756,7 @@ v1.13.1 zip contains 114 nested `node_modules` entries (`body-parser/node_module
 while a vulnerable nested copy ships beside it.
 
 ```bash
+# Do this for desktop-touch-mcp-macos-arm64.zip too: it carries its own node_modules.
 curl -sL -o rel.zip "https://github.com/Harusame64/desktop-touch-mcp/releases/download/vX.Y.Z/desktop-touch-mcp-windows.zip"
 
 # Every copy of <pkg>, hoisted and nested. For a scoped package pass the full
@@ -754,13 +781,15 @@ via `vitest` → `vite`) never enter the zip and are unaffected by this gap.
 - `npm version X.Y.Z --no-git-tag-version` can update `package.json`, `package-lock.json`,
   `src/version.ts`, and `bin/launcher.js` even if the lifecycle `git add` fails with an index permission error.
   Check the file contents after a failed version command before retrying or editing.
-- `bin/launcher.js` in `main` always shows `sha256: "PENDING"` after a release commit. This is intentional.
+- `bin/launcher.js` in `main` always shows every `RELEASE_MANIFEST.sha256` entry as `"PENDING"` after a release commit. This is intentional.
   The CI `npm-publish` job updates the hash in its working-tree only before publishing. The published npm
   tarball contains the correct SHA256; `main` does not need a second commit.
-- `npm run check:launcher-manifest` fails while sha256 is `"PENDING"`. That is expected and prevents
+- `npm run check:launcher-manifest` fails while any sha256 entry is `"PENDING"`. That is expected and prevents
   accidental local `npm publish`.
 - If the `npm-publish` job fails after zip is uploaded: do NOT re-push the same tag. Create a new patch
-  version (vX.Y.Z+1) and go through the full flow again.
+  version (vX.Y.Z+1) and go through the full flow again. **Exception — `macos-release` failed, so
+  `npm-publish` was skipped (nothing was published):** use "Re-run failed jobs" on that run; when
+  `macos-release` passes, `npm-publish` runs. Do not cut a patch version for it.
 - `gh` may be unusable if its stored token is expired, and unauthenticated GitHub API calls can hit rate limits.
   In that case, monitor the Actions and Release pages in the browser.
 - A direct asset URL can return `404` while the workflow is still running or before upload completes.
@@ -812,15 +841,16 @@ Phases 4, 5, 6 are now handled by the `npm-publish` job in `release.yml`. Manual
 
 ```
 tag push
-  → windows-release job: build zip (~4 min)
-  → npm-publish job:
-      download zip → compute SHA256 → update launcher.js (working-tree only)
+  → windows-release job: build the Windows zip (~4 min)
+  → macos-release job (after windows-release): build the macOS zip, smoke its contents, upload
+  → npm-publish job (after both):
+      download each zip → compute its SHA256 → update its launcher.js entry (working-tree only)
       → check:launcher-manifest → build → npm publish --provenance (OIDC, no 2FA)
       → verify npm view
 ```
 
-**Note**: `bin/launcher.js` in the `main` branch retains `sha256: "PENDING"` after the tag push.
-This is intentional. The correct SHA256 is embedded in the npm package tarball by CI.
+**Note**: `bin/launcher.js` in the `main` branch retains every sha256 entry as `"PENDING"` after the tag push.
+This is intentional. The correct SHA256s are embedded in the npm package tarball by CI.
 To inspect the published SHA256: `npm pack @harusame64/desktop-touch-mcp --dry-run` and read bin/launcher.js.
 
 **Prerequisite (one-time)**: Trusted Publisher must be configured on npmjs.com.
@@ -829,7 +859,7 @@ See "npm Trusted Publisher Setup" section below.
 ### Phase 1 — Version bump + build
 
 - `npm version X.Y.Z --no-git-tag-version`
-  → auto-updates: `package.json`, `package-lock.json`, `src/version.ts`, `bin/launcher.js` PACKAGE_VERSION, `RELEASE_MANIFEST.tagName`, and `RELEASE_MANIFEST.sha256` (reset to `"PENDING"`)
+  → auto-updates: `package.json`, `package-lock.json`, `src/version.ts`, `bin/launcher.js` PACKAGE_VERSION, `RELEASE_MANIFEST.tagName`, and every `RELEASE_MANIFEST.sha256` entry (reset to `"PENDING"`)
   → No manual edits to `bin/launcher.js` needed.
 - Add a new `CHANGELOG.md` entry for `X.Y.Z` (see "Version Checklist" above); fold any `## [Unreleased]` section into it.
 - `node --check bin/launcher.js`
@@ -839,7 +869,7 @@ See "npm Trusted Publisher Setup" section below.
   fails there the whole `windows-release` job fails, and since a tag must never be
   moved, the only way forward is a fresh patch version.
 
-**Done when**: build passes; `package.json`, `src/version.ts`, and `bin/launcher.js` tagName all show the new version; sha256 shows `"PENDING"`; `CHANGELOG.md` has the new entry at the top.
+**Done when**: build passes; `package.json`, `src/version.ts`, and `bin/launcher.js` tagName all show the new version; every sha256 entry shows `"PENDING"`; `CHANGELOG.md` has the new entry at the top.
 
 ### Phase 2 — HTTP transport verification
 
@@ -872,18 +902,24 @@ if any test fails or the version line is stale.
 
 Monitor at: `https://github.com/Harusame64/desktop-touch-mcp/actions`
 
-The `npm-publish` job (runs after `windows-release`):
-1. Downloads zip with retry loop (handles GitHub asset eventual consistency)
-2. Verifies `dist/index.js` is present in the zip
-3. Computes SHA256 and updates `bin/launcher.js` in working-tree
+The `npm-publish` job (runs after `windows-release` **and `macos-release`** — a failed macOS job
+holds the npm release for everyone, Windows included; see the next paragraphs):
+1. Downloads each zip with a retry loop (handles GitHub asset eventual consistency)
+2. Verifies `dist/index.js` is present in each zip (and the darwin addon in the macOS zip)
+3. Computes each zip's SHA256 and sets its entry in `bin/launcher.js` in working-tree
 4. Runs `check:launcher-manifest` and `build`
 5. Runs `npm publish --provenance` (OIDC Trusted Publishing — no 2FA required)
 6. Verifies the published version with `npm view`
 
-**Done when**: both jobs show green; `npm view @harusame64/desktop-touch-mcp dist-tags.latest` returns X.Y.Z.
+**Done when**: all three jobs show green; `npm view @harusame64/desktop-touch-mcp dist-tags.latest` returns X.Y.Z.
 
 If the `npm-publish` job fails after zip is built: create a new patch version (vX.Y.Z+1).
 Do NOT re-push the same tag.
+
+If **`macos-release`** fails (e.g. the AX smoke on the runner flakes), `npm-publish` is skipped and
+nothing was published: the GitHub release carries the Windows zip only and every user stays on the
+previous npm version. Use "Re-run failed jobs" on the same run; once `macos-release` passes,
+`npm-publish` runs. Do not cut a patch version for this.
 
 If `windows-release` fails at **Build release notes from CHANGELOG**, `CHANGELOG.md` has no
 `## [X.Y.Z]` section for the tag (or its heading is malformed). Nothing was published — the
