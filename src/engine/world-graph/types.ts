@@ -11,6 +11,18 @@ export type UiEntityRole = "button" | "textbox" | "link" | "menuitem" | "label" 
  * non-null locator field.
  */
 export interface EntityLocator {
+  /**
+   * macOS Accessibility (Mac port): the element as `macAxTree` read it. `id` is a child-index
+   * path from the app; the act is refused unless the root (window) and the element still carry
+   * the keys read here (src/macos/ax.rs).
+   */
+  ax?: {
+    pid: number;
+    id: string;
+    role: string;
+    rootKey: string;
+    elementKey: string;
+  };
   /** UIA: element identified by AutomationId and/or accessible name. */
   uia?: {
     automationId?: string;
@@ -73,7 +85,7 @@ export interface EntityLocator {
   visual?: { rect?: Rect; trackId?: string };
 }
 export type AffordanceVerb = "invoke" | "click" | "type" | "select" | "scrollTo" | "read";
-export type EntitySourceKind = "uia" | "cdp" | "win32" | "ocr" | "som" | "visual_gpu" | "terminal" | "inferred";
+export type EntitySourceKind = "uia" | "cdp" | "win32" | "ocr" | "som" | "visual_gpu" | "terminal" | "inferred" | "ax";
 /**
  * `"keyboard"` is a sub-executor used as a fallback from the UIA `setValue` route
  * when `uiaSetValue` throws (e.g. Notepad's RichEditD2DPT exposes `ValuePattern` but
@@ -85,7 +97,7 @@ export type EntitySourceKind = "uia" | "cdp" | "win32" | "ocr" | "som" | "visual
  * path-class refactor epic may promote it to a first-class executor once the
  * capability registry consolidates the ladder.
  */
-export type ExecutorKind = "uia" | "cdp" | "terminal" | "mouse" | "keyboard";
+export type ExecutorKind = "uia" | "cdp" | "terminal" | "mouse" | "keyboard" | "ax";
 
 /**
  * Issue #327 item C: rich return shape for `ExecutorFn` / `TouchEnvironment.execute`
@@ -201,7 +213,7 @@ export interface UiEntity {
    * of cross-boundary deps; structural compatibility lets `see()` assign
    * the field from a full `EntityCapabilities` value without a cast.
    */
-  unsupportedExecutors?: Array<"uia" | "cdp" | "terminal" | "mouse" | "keyboard">;
+  unsupportedExecutors?: Array<"uia" | "cdp" | "terminal" | "mouse" | "keyboard" | "ax">;
   /**
    * ADR-020 SR-1 PR-SR1-1 (北極星 8, case β entity bake): executor route
    * order baked from the registry-derived `EntityCapabilities` during
@@ -224,8 +236,10 @@ export interface UiEntity {
    * inputs. The inline shape does not automatically follow
    * `AdvertisedExecutorKind` because the engine layer intentionally avoids
    * importing types from the advisory layer (`src/tools/desktop-constraints.ts`).
+   *
+   * Mac port: `"ax"` (macOS Accessibility), for the same reason — `AdvertisedExecutorKind` gained it.
    */
-  preferredExecutors?: Array<"uia" | "cdp" | "terminal" | "mouse" | "keyboard">;
+  preferredExecutors?: Array<"uia" | "cdp" | "terminal" | "mouse" | "keyboard" | "ax">;
   /**
    * ADR-020 SR-1 PR-SR1-1 (case β entity bake): human-readable recovery
    * hint baked from the registry-derived `EntityCapabilities.fallbackHint`
