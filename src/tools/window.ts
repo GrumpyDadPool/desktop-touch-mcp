@@ -7,6 +7,7 @@ import { updateWindowCache } from "../engine/window-cache.js";
 import { listTabs, activateTab, DEFAULT_CDP_PORT } from "../engine/cdp-bridge.js";
 import type { ToolResult } from "./_types.js";
 import { failWith } from "./_errors.js";
+import { titleMatchesShownFirst } from "./_title-pick.js";
 import { coercedBoolean } from "./_coerce.js";
 import { withRichNarration } from "./_narration.js";
 import { makeCommitWrapper, withEnvelopeIncludeSchema } from "./_envelope.js";
@@ -20,7 +21,9 @@ export const getWindowsSchema = {};
 export const getActiveWindowSchema = {};
 
 export const focusWindowSchema = {
-  title: z.string().describe("Partial window title to search for (case-insensitive)"),
+  title: z.string().describe(
+    "Partial window title to search for (case-insensitive). A shown window (a minimised one counts) is taken before a hidden one with the same text; a hidden one — on another virtual desktop — only when nothing shown matches."
+  ),
   chromeTabUrlContains: z.string().optional().describe(
     "When set, activate the Chrome/Edge tab whose URL contains this substring before focusing the window. " +
     "Requires Chrome/Edge running with --remote-debugging-port (default 9222). " +
@@ -143,8 +146,9 @@ export const focusWindowHandler = async ({
     updateWindowCache(windows);
     const query = title.toLowerCase();
 
-    for (const win of windows) {
-      if (!win.title.toLowerCase().includes(query)) continue;
+    // A shown window before a hidden one with the same title: a minimised packaged app's frozen
+    // content is listed above its frame, and bringing it forward fails (`_title-pick.ts`).
+    for (const win of titleMatchesShownFirst(windows, query)) {
 
       // ── Issue #197: foreground-transfer auto-escalation ─────────────────
       // Pre-fix behaviour was: call SetForegroundWindow once and return
