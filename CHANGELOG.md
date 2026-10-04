@@ -1,5 +1,55 @@
 # Changelog
 
+## [2.2.0] - 2026-10-04 — Says what it could not see, instead of reporting it as seen
+
+2.2 stops answering as if it had seen something it did not: a suspended app's last frame, a covered
+window, a hidden window that shares a title. It also fixes two pieces of advice and a capture mode
+that were wrong. Found by letting an agent use 2.1 for real work and reading where it went wrong.
+
+### Fixed — things that could cost you work
+- **A keyboard hint no longer leads to replacing a document.** After `keyboard({action:'type'})` into
+  a text field, the hint recommended `desktop_act` type instead. An agent appending at the caret
+  followed it, and the whole document was replaced. The hint now says that `desktop_act` replaces
+  the field's whole value, and that `keyboard` remains the way to insert or append at the caret.
+- **`window_dock` and `focus_window` act on the window you can see.** A minimised Store app (such as
+  Calculator) has a hidden, suspended window with the same title, listed above the real one.
+  `window_dock` moved that hidden window, made it topmost, and answered `ok`, while the app stayed
+  minimised. `dock`, `pin` and `focus_window` now take the shown window. `dock` and `pin` refuse when
+  only a hidden one matches, and `pin` says when the window it pinned is minimised.
+
+### Fixed — reads that reported what was not there
+- **A suspended app is not read from its last frame.** Windows suspends a Store app (Settings,
+  Calculator…) a second or two after it is minimised or hidden. `desktop_discover` then OCRed its
+  last frame, account name included, as if it were the window now. Every OCR road and
+  `screenshot(detail='text')` now refuse such a window (`WindowFrozen`; discover's
+  `entityZeroReason: "window_frozen"`). `desktop_discover`'s `windows[]` marks hidden windows
+  `isCloaked`, and suspended ones `isFrozen`.
+- **A covered window is not reported unchanged.** After an act, `observation` counts only the part of
+  the window on screen. If part of the window was covered and nothing changed on the visible part,
+  the answer is `indeterminate` with `visibleFraction`, not `no_change`.
+- **`desktop_discover` says when its list was cut** at `maxEntities` (`entities_capped`,
+  `entitiesCapped`). In Explorer, the default 20 used to cut the files and the item count silently.
+- **`desktop_state`'s `cursorOverWindow`** no longer names a window on another virtual desktop or a
+  minimised one.
+- **Browser tabs opened on a port other than 9222** are read and acted on at that port by
+  `desktop_discover`, `desktop_act`, `desktop_state(includeDocument)` and `wait_until`.
+
+### Fixed — screenshots
+- **`screenshot(mode='background')` works again.** Since at least 1.16 it failed with an empty
+  reason on every window.
+- **Dot-by-dot origins and OCR positions are right for GPU-composited windows.** A frame captured
+  through Windows Graphics Capture starts at the window's visible frame, 7 px inside the window
+  rectangle at default scaling. Origins and OCR boxes now use that frame; a click at an origin no
+  longer lands 7 px off.
+
+### Known limitations
+- With a video playing behind a partly covered window, `observation` can still report the video's
+  repaint as the act's change.
+- `desktop_discover` aimed at a Store app's frame window (rather than its title) is not yet tested
+  for suspension.
+- Unchanged from 2.1: `terminal(action:'run')` can answer `BaselineMarkerLost` on its first run in a
+  new console although the command ran.
+
 ## [2.1.0] - 2026-10-04 — Deeper UI Automation reads: more to see and more to act on. Acts no longer deadlock the mouse and window switching
 
 Two changes. `desktop_discover`'s UI Automation read used to stop at depth 4, and now goes to
