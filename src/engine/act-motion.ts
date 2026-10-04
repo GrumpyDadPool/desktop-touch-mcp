@@ -73,12 +73,50 @@ export function largestHit(rects: readonly Box[], target: Box): number {
   return best;
 }
 
+/** `a` minus `b`, as up to four boxes. */
+function subtract(a: Box, b: Box): Box[] {
+  if (insideArea(a, b) === 0) return [a];
+  const out: Box[] = [];
+  const ax2 = a.x + a.width, ay2 = a.y + a.height, bx2 = b.x + b.width, by2 = b.y + b.height;
+  if (b.y > a.y) out.push({ x: a.x, y: a.y, width: a.width, height: b.y - a.y });
+  if (by2 < ay2) out.push({ x: a.x, y: by2, width: a.width, height: ay2 - by2 });
+  const top = Math.max(a.y, b.y), bottom = Math.min(ay2, by2);
+  if (b.x > a.x) out.push({ x: a.x, y: top, width: b.x - a.x, height: bottom - top });
+  if (bx2 < ax2) out.push({ x: bx2, y: top, width: ax2 - bx2, height: bottom - top });
+  return out.filter((r) => r.width > 0 && r.height > 0);
+}
+
+/**
+ * internal #245 — the parts of `frame` that windows above it leave on screen. DXGI reports what was
+ * composed; a covered part's repaint is never composed, and another window's repaint there is not
+ * this window's (win2: a video behind the target crossed its rect and read as the act's change).
+ */
+export function visibleParts(frame: Box, covers: readonly Box[]): Box[] {
+  let parts: Box[] = [frame];
+  for (const c of covers) {
+    parts = parts.flatMap((p) => subtract(p, c));
+    if (parts.length === 0) break;
+  }
+  return parts;
+}
+
+/** The largest area any one rect of the batch covers inside the visible parts. */
+function largestVisibleHit(rects: readonly Box[], parts: readonly Box[]): number {
+  let best = 0;
+  for (const r of rects) {
+    let inside = 0;
+    for (const p of parts) inside += insideArea(r, p);
+    best = Math.max(best, inside);
+  }
+  return best;
+}
+
 /** What a window did while nothing acted on it. */
 export interface QuietRecord {
   /** Rects of at least `minRectPx` landed inside it at least twice, `selfRepaintGapMs` apart. */
   selfRepainting: boolean;
-  /** How long it was watched. */
-  watchedMs: number;
+  /** How long it was watched; absent when no watch ran and the verdict comes from an earlier one. */
+  watchedMs?: number;
 }
 
 type Entry = { hwnd: bigint; rect: Box; stop: () => void; seen: { first?: number; selfRepainting: boolean }; since: number; countFrom: number; stoppedAt?: number };
@@ -100,6 +138,17 @@ export class PreActWatch {
    * once its own closes, and must not bring this one's verdict with it (PR codex P2).
    */
   private readonly knownSelfRepainting = new Set<string>();
+
+  /**
+   * No watch of this window to read (none started, none could see it, or it watched another window
+   * or another place): what earlier watches learned about the window the act is on still holds —
+   * without it, a known self-repainting window brought forward by the act reads its own repaint as
+   * the act's change (gate 2 on 5b474fef). No `watchedMs`: nothing was watched now.
+   */
+  private knownFor(now: { hwnd: bigint } | undefined): QuietRecord | undefined {
+    const id = now !== undefined ? this.identityKey(now.hwnd) : undefined;
+    return id !== undefined && this.knownSelfRepainting.has(id) ? { selfRepainting: true } : undefined;
+  }
 
   private identityKey(hwnd: bigint): string | undefined {
     try {
@@ -126,8 +175,16 @@ export class PreActWatch {
   }
 
   /** `afterAct`: the watch follows an act on this window, whose own repaint is still finishing. */
-  start(key: string, hwnd: bigint, windowRect: Box, opt: { afterAct?: boolean } = {}): void {
+  /**
+   * `visible`: the parts of the window on screen (internal #245, `visibleParts`), so a window behind
+   * or above repainting over its rect is not taken for this one repainting itself (gate 2 on #771).
+   * All of `windowRect` when absent.
+   */
+  start(key: string, hwnd: bigint, windowRect: Box, opt: { afterAct?: boolean; visible?: readonly Box[] } = {}): void {
     this.end(key);
+    // Nothing of it on screen: such a watch sees nothing by construction, and a watch that saw
+    // nothing must not be taken for a quiet window (gate 2 on 367eb814).
+    if (opt.visible !== undefined && !opt.visible.some((p) => p.width > 0 && p.height > 0)) return;
     const broker = this.broker();
     if (broker === null) return;
     const where = resolveOutputIndexForHwnd(hwnd, windowRect, this.opts.enumerate ? { enumerate: this.opts.enumerate } : undefined);
@@ -146,7 +203,7 @@ export class PreActWatch {
         (rects) => {
           if (entry.stoppedAt !== undefined) return;
           const t = this.now();
-          if (t < countFrom || largestHit(rects, windowRect) < ACT_MOTION.minRectPx) return;
+          if (t < countFrom || largestVisibleHit(rects, opt.visible ?? [windowRect]) < ACT_MOTION.minRectPx) return;
           if (entry.seen.first === undefined) entry.seen.first = t;
           else if (t - entry.seen.first >= ACT_MOTION.selfRepaintGapMs) entry.seen.selfRepainting = true;
         },
@@ -186,12 +243,13 @@ export class PreActWatch {
    */
   take(key: string, now?: { hwnd: bigint; rect: Box }): QuietRecord | undefined {
     const w = this.watches.get(key);
-    if (!w) return undefined;
+    if (!w) return this.knownFor(now);
     const end = w.stoppedAt ?? this.now();
     this.end(key);
     // Watched another window, or this one where it no longer is (moved, or onto another monitor):
     // what it saw is not about the window the act is on (PR codex P2).
-    if (now !== undefined && (now.hwnd !== w.hwnd || !sameBox(now.rect, w.rect))) return undefined;
+    // What earlier watches learned about the window the act is on still holds (gate 2 on ae15b2f7).
+    if (now !== undefined && (now.hwnd !== w.hwnd || !sameBox(now.rect, w.rect))) return this.knownFor(now);
     const key2 = this.identityKey(w.hwnd);
     if (w.seen.selfRepainting && key2 !== undefined) {
       this.knownSelfRepainting.add(key2);
@@ -229,10 +287,21 @@ export async function observeAfterAct(
   sub: BrokerSubscription,
   target: Box,
   quiet: QuietRecord | undefined,
-  opts: { now?: () => number; windowMs?: number; cacheState?: CacheAcquireState } = {},
+  opts: {
+    now?: () => number;
+    windowMs?: number;
+    cacheState?: CacheAcquireState;
+    /** internal #245 — the parts of `target` on screen (`visibleParts`); all of it when absent. */
+    visible?: readonly Box[];
+  } = {},
 ): Promise<{ observation: VisualMotionObservation; dirtyRects: Rect[] }> {
   const now = opts.now ?? (() => performance.now());
   const windowMs = opts.windowMs ?? ACT_MOTION.windowMs;
+  const parts: readonly Box[] = opts.visible ?? [target];
+  const targetArea0 = Math.max(1, target.width * target.height);
+  const visibleArea = parts.reduce((sum, p) => sum + p.width * p.height, 0);
+  // Covered at all → a read of nothing is not "no change" (an 8×8 slack; a change is 500 px or more).
+  const covered = visibleArea < targetArea0 - 64;
   const start = now();
   const seen: Rect[] = [];
   let best = 0;
@@ -252,9 +321,9 @@ export async function observeAfterAct(
       batches = i + 1;
       for (const r of batch) {
         seen.push({ x: r.x, y: r.y, width: r.width, height: r.height });
-        totalInside += insideArea(r, target);
+        totalInside += parts.reduce((sum, p) => sum + insideArea(r, p), 0);
       }
-      best = Math.max(best, largestHit(batch, target));
+      best = Math.max(best, largestVisibleHit(batch, parts));
       if (best >= ACT_MOTION.minRectPx) break;
       if (now() - start >= windowMs) break;
     }
@@ -276,7 +345,9 @@ export async function observeAfterAct(
     ? "indeterminate"
     : best >= ACT_MOTION.minRectPx
       ? "any_change"
-      : "no_change";
+      : covered
+        ? "indeterminate"
+        : "no_change";
   return {
     observation: {
       motion,
@@ -284,8 +355,9 @@ export async function observeAfterAct(
       ...residual,
       framesSampled: batches,
       totalElapsedMs: elapsed,
-      ...(quiet !== undefined && { watchedBeforeMs: quiet.watchedMs }),
+      ...(quiet?.watchedMs !== undefined && { watchedBeforeMs: quiet.watchedMs }),
       ...(quiet?.selfRepainting && { selfRepainting: true }),
+      ...(covered && { visibleFraction: Math.round((visibleArea / targetArea0) * 1000) / 1000 }),
       ...cacheState,
     },
     dirtyRects: seen,
