@@ -611,6 +611,11 @@ const SUGGESTS: Record<string, string[]> = {
     "A type or setValue on a control UI Automation reports as a button, check box, radio button, hyperlink or menu item is this refusal too: none of them takes text, so nothing was typed — if you meant to press it, ask for click or invoke.",
     "desktop_discover never offers 'select' on any target, so asking for it is always this refusal — reach a list item, combo entry or tab by clicking it. NOTE: screenshot(detail='elements') and workspace_snapshot DO print action:'select' on list items; that is a different reader's word for the same click, and desktop_act does not take it.",
   ],
+  // Internal #247 — `WindowFrozenError` (`engine/window-frozen.ts`) declares this code.
+  WindowFrozen: [
+    "Nothing was read: the window's app is suspended by Windows, so UI Automation reads nothing from it and a capture would show its last frame, not what it shows now.",
+    "Restore or show the window (focus_window, or the user brings it back), then read it again. Retrying while it stays minimised or hidden returns the same.",
+  ],
   // internal #182. The value road wrote, UI Automation answered success, and the control's value
   // did not move — so nothing was written, and the caller must not read the refusal as "try harder
   // on the same control". Measured on a WinForms NumericUpDown: a keystroke fallback landed at the
