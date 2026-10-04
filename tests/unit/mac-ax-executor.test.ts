@@ -144,3 +144,44 @@ describe("an incomplete read after the act (codex, #780)", () => {
     expect(qualifyPostRead(res, { warnings: [] })).toBe(res);
   });
 });
+
+describe("a sheet or modal window blocks the act (2026-10-04)", () => {
+  const target: any = { locator: { ax: { pid: 7, id: "a.0.1", role: "AXTextArea", rootKey: "R", elementKey: "E" } } };
+  it("maps modal_blocking to ModalBlockingError with the sheet in the detail", async () => {
+    const exec = createMacAxExecutor({ perform: vi.fn(), setValue: vi.fn(async () => ({ ok: false, reason: "modal_blocking", blocker: "sheet:" })) } as any);
+    const err: any = await exec(target, "type", "x").catch((e) => e);
+    expect(err.name).toBe("ModalBlockingError");
+    expect(err.callerDetail).toContain("sheet");
+  });
+  it("the touch loop reports modal_blocking, not executor_failed", async () => {
+    const now = Date.now();
+    const cand: any = { source: "ax", target: { kind: "window", id: "W" }, role: "textbox", label: "Body", rect: { x: 0, y: 0, width: 10, height: 10 },
+      actionability: ["type"], confidence: 0.9, observedAtMs: now, digest: "d_body", locator: target.locator };
+    const exec = createMacAxExecutor({ perform: vi.fn(), setValue: vi.fn(async () => ({ ok: false, reason: "modal_blocking", blocker: "modal_window:Alert" })) } as any);
+    const f = new DesktopFacade(async () => [cand], { executorFn: exec });
+    const see = await f.see({ target: { windowTitle: "W" } });
+    const r = await f.touch({ lease: see.entities[0]!.lease, action: "type", text: "x" });
+    expect(r.ok).toBe(false);
+    expect((r as any).reason).toBe("modal_blocking");
+    expect(String((r as any).detail)).toContain("Alert");
+  });
+});
+
+describe("append (codex #782: never replace with a cut value)", () => {
+  const entity: any = { locator: { ax: { pid: 7, id: "a.0.1", role: "AXTextArea", rootKey: "R", elementKey: "E" } } };
+  it("inserts at the end and does not replace", async () => {
+    const setValue = vi.fn(), insertText = vi.fn(async () => ({ ok: true, valueAfter: "old\nnew" }));
+    const exec = createMacAxExecutor({ perform: vi.fn(), setValue, insertText, appendMode: () => true } as any);
+    expect(await exec(entity, "type", "new")).toBe("ax");
+    expect(insertText).toHaveBeenCalledWith(expect.anything(), "new", -1);
+    expect(setValue).not.toHaveBeenCalled();
+  });
+  it("refuses value_not_applied when the whole text came back without the new end", async () => {
+    const exec = createMacAxExecutor({ perform: vi.fn(), setValue: vi.fn(), insertText: vi.fn(async () => ({ ok: true, valueAfter: "old" })), appendMode: () => true } as any);
+    expect((await exec(entity, "type", "new").catch((e: any) => e)).name).toBe("ValueNotAppliedError");
+  });
+  it("does not judge the end of a capped read-back", async () => {
+    const exec = createMacAxExecutor({ perform: vi.fn(), setValue: vi.fn(), insertText: vi.fn(async () => ({ ok: true, valueAfter: "x".repeat(2000) })), appendMode: () => true } as any);
+    expect(await exec(entity, "type", "new")).toBe("ax");
+  });
+});

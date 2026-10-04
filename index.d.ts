@@ -904,7 +904,7 @@ export interface NativeMacFocus {
   focusedRole?: string
   focusedTitle?: string
   focusedWindowTitle?: string
-  /** `system_wide`, or `app_scan` when the system-wide AX element did not answer. */
+  /** `system_wide`; or, when it did not answer or named an app with no on-screen window, `app_scan` / `app_scan_offscreen` / `app_scan_topmost` (src/macos/system.rs). */
   source?: string
   error?: string
 }
@@ -936,6 +936,8 @@ export interface NativeMacAxElement {
   title?: string
   description?: string
   value?: string
+  /** `value` was cut at 2000 characters: it is not the whole text. */
+  valueTruncated: boolean
   identifier?: string
   frame?: NativeMacRect
   enabled?: boolean
@@ -976,10 +978,12 @@ export interface NativeMacAxTarget {
 export interface NativeMacActResult {
   ok: boolean
   /** `element_not_found`, `element_changed`, `action_not_advertised`,
-   *  `value_not_settable`, `selection_not_settable`, `length_unknown`, or an AX error name. */
+   *  `value_not_settable`, `selection_not_settable`, `length_unknown`, `modal_blocking`, or an AX error name. */
   reason?: string
   valueAfter?: string
   role?: string
+  /** For `modal_blocking`: `sheet:<title>` or `modal_window:<title>`. */
+  blocker?: string
 }
 
 export interface NativeMacCaptureOptions {

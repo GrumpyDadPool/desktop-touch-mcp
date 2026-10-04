@@ -37,13 +37,19 @@ export interface MacStateDeps {
  * reason in `hints.reason` and what to do in `suggest`, as the Windows desktop_state promises
  * ("other values require recovery (see suggest[])").
  */
-export type MacStateReason = "display_asleep" | "no_frontmost_app" | "read_failed";
+export type MacStateReason = "display_asleep" | "no_frontmost_app" | "read_failed" | "frontmost_guessed";
 
 export interface MacDesktopState {
   focusedWindow: { title: string | null; appName: string | null; pid: number } | null;
   focusedElement: { role: string; title: string | null } | null;
   /** On-screen app windows (layer 0, not fully transparent); null when the list could not be read. */
   visibleWindows: number | null;
+  /**
+   * Those windows, front to back (at most 30): title as macOS shows it — in the user's language, so
+   * Calculator can be "計算機" — app name and pid. The dogfood (2026-10-04) had no way to learn a title
+   * to pass to desktop_discover / screenshot.
+   */
+  windows: Array<{ title: string | null; app: string | null; pid: number }> | null;
   /** null when it could not be asked. */
   displayAsleep: boolean | null;
   attention: "ok" | "needs_escalation";
@@ -64,6 +70,9 @@ const SUGGEST: Record<MacStateReason, string[]> = {
   ],
   no_frontmost_app: [
     "No app answered as frontmost. Call desktop_state again; if it persists, the app in front may not support Accessibility.",
+  ],
+  frontmost_guessed: [
+    "No app said it is frontmost, so the owner of the frontmost window is shown — a guess. Pass a window title (windows[] lists them) to desktop_discover / screenshot rather than relying on 'frontmost'.",
   ],
   read_failed: [
     "Part of the desktop could not be read (see hints.readErrors); what is shown was read. Call desktop_state again.",
@@ -94,10 +103,11 @@ export async function macDesktopStateHandler(deps: MacStateDeps): Promise<ToolRe
     readErrors.focus = errText(e);
   }
   let visibleWindows: number | null = null;
+  let windows: MacDesktopState["windows"] = null;
   try {
-    visibleWindows = deps
-      .listWindows(true)
-      .filter((w) => w.layer === 0 && w.onScreen && w.alpha !== 0).length;
+    const shown = deps.listWindows(true).filter((w) => w.layer === 0 && w.onScreen && w.alpha !== 0);
+    visibleWindows = shown.length;
+    windows = shown.slice(0, 30).map((w) => ({ title: w.title || null, app: w.ownerName ?? null, pid: w.pid }));
   } catch (e) {
     readErrors.windows = errText(e);
   }
@@ -115,7 +125,9 @@ export async function macDesktopStateHandler(deps: MacStateDeps): Promise<ToolRe
         ? "read_failed"
         : focus.pid == null
           ? "no_frontmost_app"
-          : null;
+          : focus.source === "app_scan_topmost"
+            ? "frontmost_guessed"
+            : null;
 
   const state: MacDesktopState = {
     focusedWindow:
@@ -129,6 +141,7 @@ export async function macDesktopStateHandler(deps: MacStateDeps): Promise<ToolRe
     focusedElement:
       focus.focusedRole == null ? null : { role: focus.focusedRole, title: focus.focusedTitle ?? null },
     visibleWindows,
+    windows,
     displayAsleep,
     attention: reason === null ? "ok" : "needs_escalation",
     ...(reason === null ? {} : { suggest: SUGGEST[reason] }),
@@ -148,9 +161,14 @@ export const macDesktopStateDescription = buildDesc({
     "Read-only observation of the macOS desktop: the frontmost app, its focused window and element, and how many windows are on screen.",
   details:
     "Returns focusedWindow {title, appName, pid}, focusedElement {role, title} (null when the app has none, e.g. its window is on another Space), " +
-    "visibleWindows (on-screen app windows), displayAsleep, attention, permissions {accessibility, screenCapture}. " +
+    "visibleWindows and windows[] (on-screen app windows front to back: title, app, pid — titles are in the user's language, e.g. Calculator " +
+    "may be \"計算機\"; pass them to desktop_discover / screenshot), displayAsleep, attention, permissions {accessibility, screenCapture}. " +
     "attention: 'ok', or 'needs_escalation' with hints.reason and suggest[]: 'display_asleep' (macOS then answers windows with the app itself; wake it and read again), " +
-    "'no_frontmost_app', 'read_failed' (hints.readErrors; what was read is still returned). The focused element's value is never returned.",
+    "'no_frontmost_app', 'read_failed' (hints.readErrors; what was read is still returned). The focused element's value is never returned. " +
+    "hints.focusSource / focusError say how the frontmost app was found (diagnostics: system_wide, app_scan, system_wide_windowless, " +
+    "app_scan_offscreen — e.g. focusError 'cannot_complete' or 'system_wide_no_window' with a found app is a normal answer; " +
+    "app_scan_topmost is a guess and answers needs_escalation / frontmost_guessed). " +
+    "windows[] can include an app's untitled helper windows (title null).",
   prefer: "Use first to orient, and after each action to confirm. Cheapest observation tool.",
   caveats:
     "Needs Accessibility permission for the app running this server; without it the call fails with PermissionRequired and says where to grant it.",

@@ -26,6 +26,15 @@ export interface MacAxProviderDeps {
 /** What the read could not do, for the tool to say beside the entities. */
 export interface MacAxReadNotes {
   warnings: string[];
+  /**
+   * The current value of each text field read, by entity id (`ent_` + digest). The shared entity
+   * view carries no value, and `type` replaces the whole value, so without it a caller could not
+   * add to a field without guessing its text (dogfood 2026-10-04: it read the text off a screenshot).
+   * Never a password field's (the candidate has no value then).
+   */
+  values?: Record<string, string>;
+  /** Entity ids of text fields whose value is longer than the read cap (no value is given for them). */
+  truncated?: string[];
   pid?: number;
   appTitle?: string;
 }
@@ -74,10 +83,23 @@ export function actionabilityOf(e: NativeMacAxElement): UiEntityCandidate["actio
  * so a label is named by its value first — as a Windows static text is named
  * by the text it shows.
  */
+/**
+ * The title bar's buttons carry no title or description, only a subrole, so they came out as
+ * nameless "button"s — and a caller pressing a nameless button closed a document (2026-10-04, the
+ * sheet measurement). Name them by what they do.
+ */
+const WINDOW_BUTTONS: Record<string, string> = {
+  AXCloseButton: "Close window",
+  AXMinimizeButton: "Minimize window",
+  AXFullScreenButton: "Full screen",
+  AXZoomButton: "Zoom window",
+};
+
 function labelOf(e: NativeMacAxElement): string | undefined {
   if (roleOf(e) === "label" && e.value) return e.value;
   if (e.title) return e.title;
   if (e.description) return e.description;
+  if (e.subrole !== undefined && WINDOW_BUTTONS[e.subrole] !== undefined) return WINDOW_BUTTONS[e.subrole];
   return undefined;
 }
 
@@ -120,7 +142,8 @@ export function toCandidate(
     target: { kind: "window", id: targetId },
     role: roleOf(e),
     ...(label !== undefined && { label }),
-    ...(!secure && roleOf(e) !== "label" && e.value !== undefined && { value: e.value }),
+    // A cut value is not the field's text; it is left out rather than offered as if it were (codex, #782).
+    ...(!secure && roleOf(e) !== "label" && e.value !== undefined && !e.valueTruncated && { value: e.value }),
     ...(e.frame !== undefined && { rect: { x: e.frame.x, y: e.frame.y, width: e.frame.width, height: e.frame.height } }),
     actionability: actionabilityOf(e),
     controlType: e.role,
@@ -183,12 +206,37 @@ export async function readMacAxCandidates(
   if (tree.displayAsleep) notes.warnings.push("display_asleep");
   if (tree.selfReference) notes.warnings.push("ax_self_reference");
   if (tree.truncated) notes.warnings.push(`truncated:${tree.stoppedBy ?? "unknown"}`);
+  // A sheet blocks its window (acts behind it are refused natively). Its controls may live in
+  // another process — the open/save panel's do, and then nothing of it is in this tree.
+  // The same sheet can be reached from two roots (its window and the focused window): say it once.
+  // In this process when anything under it can be acted on; the open/save panel's sheet holds
+  // nothing here (gate 2, #782: a child count misreads an in-process sheet wrapped in one group).
+  // With a title, only the target window's sheets: another document's sheet does not block this one.
+  const sheetNeedle = title?.toLowerCase();
+  for (const sheet of tree.elements.filter(
+    (e) => e.role === "AXSheet" && (!sheetNeedle || rootTitle(e.rootKey).toLowerCase().includes(sheetNeedle))
+  )) {
+    const inside = tree.elements.some((e) => e.id.startsWith(`${sheet.id}.`) && (e.actions.length > 0 || e.valueSettable));
+    const w = inside ? "sheet_open" : "sheet_open_in_other_process";
+    if (!notes.warnings.includes(w)) notes.warnings.push(w);
+  }
 
   const needle = title?.toLowerCase();
   const observedAtMs = deps.now();
   const targetId = title ?? tree.appTitle ?? String(pid);
-  return tree.elements
+  const candidates = tree.elements
     .filter((e) => needle === undefined || needle === "" || rootTitle(e.rootKey).toLowerCase().includes(needle))
     .filter(isCandidate)
     .map((e) => toCandidate(e, pid, targetId, observedAtMs));
+  for (const c of candidates) {
+    if (c.role === "textbox" && c.value !== undefined && c.digest !== undefined) {
+      (notes.values ??= {})[`ent_${c.digest}`] = c.value;
+    }
+  }
+  for (const e of tree.elements) {
+    if (e.valueTruncated && roleOf(e) === "textbox" && e.subrole !== SECURE) {
+      (notes.truncated ??= []).push(`ent_${axDigest(pid, e)}`);
+    }
+  }
+  return candidates;
 }

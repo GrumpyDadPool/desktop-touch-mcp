@@ -192,3 +192,67 @@ describe("a text's identity follows what it shows (codex, #780)", () => {
     expect(toCandidate(t("7"), 7, "W", 1).digest).not.toBe(toCandidate(t("56"), 7, "W", 1).digest);
   });
 });
+
+describe("title-bar buttons are named (2026-10-04)", () => {
+  it("names the close button instead of leaving it nameless", () => {
+    const close: any = { id: "a.0.5", rootKey: "R", elementKey: "K", depth: 1, role: "AXButton", subrole: "AXCloseButton", actions: ["AXPress"], valueSettable: false, childCount: 0 };
+    expect(toCandidate(close, 7, "W", 1).label).toBe("Close window");
+  });
+});
+
+describe("sheet warnings (2026-10-04)", () => {
+  it("says a sheet whose controls live in another process is open", async () => {
+    const sheet: any = { id: "a.0.7", rootKey: "R", elementKey: "K", depth: 1, role: "AXSheet", actions: [], valueSettable: false, childCount: 1 };
+    const notes = { warnings: [] as string[] };
+    await readMacAxCandidates({ listWindows: vi.fn(() => []), getFocus: vi.fn(async () => ({ pid: 7 })),
+      axTree: vi.fn(async () => ({ pid: 7, elements: [sheet], truncated: false, selfReference: false, displayAsleep: false, elapsedMs: 1 })), now: () => 1 } as any, undefined, notes);
+    expect(notes.warnings).toEqual(["sheet_open_in_other_process"]);
+  });
+});
+
+describe("text field values for discover (dogfood 2026-10-04)", () => {
+  const tree = (elements: any[]) => ({ pid: 7, elements, truncated: false, selfReference: false, displayAsleep: false, elapsedMs: 1 });
+  const field = (over: any): any => ({ id: "a.0.1", rootKey: "R", elementKey: "K", depth: 1, role: "AXTextArea", actions: [], valueSettable: true, childCount: 0, ...over });
+  it("records a text field's value by entity id", async () => {
+    const notes: any = { warnings: [] };
+    const [c] = await readMacAxCandidates({ listWindows: vi.fn(() => []), getFocus: vi.fn(async () => ({ pid: 7 })), axTree: vi.fn(async () => tree([field({ value: "line one\nline two" })])), now: () => 1 } as any, undefined, notes);
+    expect(notes.values).toEqual({ [`ent_${c!.digest}`]: "line one\nline two" });
+  });
+  it("never records a password field's value", async () => {
+    const notes: any = { warnings: [] };
+    await readMacAxCandidates({ listWindows: vi.fn(() => []), getFocus: vi.fn(async () => ({ pid: 7 })), axTree: vi.fn(async () => tree([field({ role: "AXTextField", subrole: "AXSecureTextField", value: "hunter2" })])), now: () => 1 } as any, undefined, notes);
+    expect(JSON.stringify(notes)).not.toContain("hunter2");
+  });
+});
+
+describe("a cut value is not offered as the text (codex #782)", () => {
+  it("leaves the value out and records the field as truncated", async () => {
+    const f: any = { id: "a.0.1", rootKey: "R", elementKey: "K", depth: 1, role: "AXTextArea", actions: [], valueSettable: true, childCount: 0, value: "x".repeat(2000), valueTruncated: true };
+    const notes: any = { warnings: [] };
+    const [c] = await readMacAxCandidates({ listWindows: vi.fn(() => []), getFocus: vi.fn(async () => ({ pid: 7 })),
+      axTree: vi.fn(async () => ({ pid: 7, elements: [f], truncated: false, selfReference: false, displayAsleep: false, elapsedMs: 1 })), now: () => 1 } as any, undefined, notes);
+    expect(c!.value).toBeUndefined();
+    expect(notes.values).toBeUndefined();
+    expect(notes.truncated).toEqual([`ent_${c!.digest}`]);
+  });
+});
+
+describe("an in-process sheet (gate 2 #782)", () => {
+  it("is sheet_open when something under it can be acted on, even inside one group", async () => {
+    const el = (id: string, role: string, over: any = {}): any => ({ id, rootKey: "R", elementKey: id, depth: id.split(".").length - 2, role, actions: [], valueSettable: false, childCount: 0, ...over });
+    const notes = { warnings: [] as string[] };
+    await readMacAxCandidates({ listWindows: vi.fn(() => []), getFocus: vi.fn(async () => ({ pid: 7 })),
+      axTree: vi.fn(async () => ({ pid: 7, elements: [el("a.0.7", "AXSheet", { childCount: 1 }), el("a.0.7.0", "AXGroup", { childCount: 1 }), el("a.0.7.0.0", "AXButton", { title: "Don't Save", actions: ["AXPress"] })], truncated: false, selfReference: false, displayAsleep: false, elapsedMs: 1 })), now: () => 1 } as any, undefined, notes);
+    expect(notes.warnings).toEqual(["sheet_open"]);
+  });
+});
+
+describe("sheet warnings follow the target window (2026-10-04)", () => {
+  it("does not warn about another document's sheet", async () => {
+    const sheet: any = { id: "a.1.8", rootKey: "Other doc\u001f\u001f0,0,1,1", elementKey: "K", depth: 1, role: "AXSheet", actions: [], valueSettable: false, childCount: 1 };
+    const notes = { warnings: [] as string[] };
+    await readMacAxCandidates({ listWindows: vi.fn(() => [{ windowId: 1, pid: 7, layer: 0, onScreen: true, title: "My doc" }]), getFocus: vi.fn(),
+      axTree: vi.fn(async () => ({ pid: 7, elements: [sheet], truncated: false, selfReference: false, displayAsleep: false, elapsedMs: 1 })), now: () => 1 } as any, { windowTitle: "my doc" }, notes);
+    expect(notes.warnings).toEqual([]);
+  });
+});

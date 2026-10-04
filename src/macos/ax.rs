@@ -88,6 +88,12 @@ pub(crate) fn children(e: &AXUIElement, timeout_secs: f32) -> Vec<CFRetained<AXU
 /// `AXValue` rendered as text: strings as-is, numbers and booleans printed.
 /// Capped so a document body does not flood the result.
 pub(crate) fn value_text(e: &AXUIElement) -> Option<String> {
+    value_text_marked(e).map(|(s, _)| s)
+}
+
+/// `AXValue` as text, capped, and whether the cap cut it. A caller must not take a cut value for
+/// the whole text: writing it back with something added would delete the rest (codex, #782).
+pub(crate) fn value_text_marked(e: &AXUIElement) -> Option<(String, bool)> {
     let v = attr(e, "AXValue").ok()?;
     let s = if let Some(s) = v.downcast_ref::<CFString>() {
         s.to_string()
@@ -100,7 +106,8 @@ pub(crate) fn value_text(e: &AXUIElement) -> Option<String> {
     } else {
         v.downcast_ref::<CFBoolean>()?.as_bool().to_string()
     };
-    Some(cap_chars(s, VALUE_CHAR_CAP))
+    let cut = s.chars().nth(VALUE_CHAR_CAP).is_some();
+    Some((cap_chars(s, VALUE_CHAR_CAP), cut))
 }
 
 fn cap_chars(s: String, cap: usize) -> String {
@@ -343,6 +350,8 @@ pub struct MacAxElement {
     pub title: Option<String>,
     pub description: Option<String>,
     pub value: Option<String>,
+    /// `value` was cut at the cap: it is not the whole text.
+    pub value_truncated: bool,
     pub identifier: Option<String>,
     pub frame: Option<MacRect>,
     pub enabled: Option<bool>,
@@ -460,7 +469,9 @@ pub(crate) fn read_tree(opts: &MacAxTreeOptions) -> MacAxTree {
         let subrole = read!(attr_string(&e, "AXSubrole"));
         let title = read!(attr_string(&e, "AXTitle").filter(|s| !s.is_empty()));
         let description = read!(attr_string(&e, "AXDescription").filter(|s| !s.is_empty()));
-        let value = read!(value_text(&e));
+        let marked = read!(value_text_marked(&e));
+        let value_truncated = marked.as_ref().is_some_and(|(_, cut)| *cut);
+        let value = marked.map(|(s, _)| s);
         let identifier = read!(attr_string(&e, "AXIdentifier").filter(|s| !s.is_empty()));
         let frame = read!(frame(&e));
         let enabled = read!(attr_bool(&e, "AXEnabled"));
@@ -483,6 +494,7 @@ pub(crate) fn read_tree(opts: &MacAxTreeOptions) -> MacAxTree {
             title,
             description,
             value,
+            value_truncated,
             identifier,
             frame,
             enabled,
@@ -541,12 +553,14 @@ pub struct MacAxTarget {
 pub struct MacActResult {
     pub ok: bool,
     /// Why the act was refused or failed: `element_not_found`,
-    /// `element_changed`, `action_not_advertised`, `value_not_settable`,
+    /// `element_changed`, `modal_blocking`, `action_not_advertised`, `value_not_settable`,
     /// `selection_not_settable`, `length_unknown`, or the AX error name.
     pub reason: Option<String>,
     /// The element's value read back after a write (capped).
     pub value_after: Option<String>,
     pub role: Option<String>,
+    /// For `modal_blocking`: `sheet:<title>` or `modal_window:<title>`.
+    pub blocker: Option<String>,
 }
 
 fn refused(reason: &str) -> MacActResult {
@@ -567,7 +581,51 @@ fn locate(t: &MacAxTarget) -> Result<CFRetained<AXUIElement>, MacActResult> {
     if element_key(&e) != t.expected_element_key {
         return Err(MacActResult { role: Some(role), ..refused("element_changed") });
     }
+    if let Some(blocker) = modal_blocker(&app, &root, &t.id, timeout) {
+        return Err(MacActResult { role: Some(role), blocker: Some(blocker), ..refused("modal_blocking") });
+    }
     Ok(e)
+}
+
+/// What blocks an act on the element at `id` under `root`, if anything (measured 2026-10-04:
+/// with TextEdit's save sheet open, AXValue and AXPress on the window behind it both took effect).
+/// - a sheet on the element's window that the element is not inside (`sheet:<title>`); a sheet
+///   whose contents live in another process (the open/save panel) blocks everything here;
+/// - another window of the app that says it is modal (`AXModal`), e.g. an app-modal alert
+///   (`modal_window:<title>`).
+fn modal_blocker(app: &AXUIElement, root: &AXUIElement, id: &str, timeout: f32) -> Option<String> {
+    let mut parts = id.split('.');
+    let root_id = match parts.next() {
+        Some("a") => format!("a.{}", parts.next().unwrap_or("")),
+        Some(other) => other.to_string(),
+        None => return None,
+    };
+    for (i, child) in children(root, timeout).iter().enumerate() {
+        if attr_string(child, "AXRole").as_deref() != Some("AXSheet") {
+            continue;
+        }
+        let sheet_id = format!("{root_id}.{i}");
+        if id != sheet_id && !id.starts_with(&format!("{sheet_id}.")) {
+            return Some(format!("sheet:{}", attr_string(child, "AXTitle").unwrap_or_default()));
+        }
+    }
+    if let Ok(v) = attr(app, "AXWindows")
+        && let Ok(arr) = v.downcast::<CFArray>()
+    {
+        let arr: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(arr) };
+        for w in arr.iter().filter_map(|w| w.downcast::<AXUIElement>().ok()) {
+            let w = with_timeout(w, timeout);
+            // Sheets are judged above, by where the element is; one listed here as a window must not
+            // also block its own controls or other documents' windows (gate 2, #782).
+            if attr_string(&w, "AXRole").as_deref() == Some("AXSheet") {
+                continue;
+            }
+            if !same(&w, root) && attr_bool(&w, "AXModal") == Some(true) {
+                return Some(format!("modal_window:{}", attr_string(&w, "AXTitle").unwrap_or_default()));
+            }
+        }
+    }
+    None
 }
 
 /// Perform an AX action, but only one the element advertises: Chrome's web

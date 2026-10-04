@@ -23,6 +23,10 @@ import type { ExecutorFn } from "../desktop.js";
 export interface MacAxExecutorDeps {
   perform(target: NativeMacAxTarget, action: string): Promise<NativeMacActResult>;
   setValue(target: NativeMacAxTarget, value: string): Promise<NativeMacActResult>;
+  /** Insert at a UTF-16 offset (negative = end) through the selection; the rest of the text is untouched. */
+  insertText?(target: NativeMacAxTarget, text: string, at?: number): Promise<NativeMacActResult>;
+  /** Whether this act was asked to append (desktop_act `append: true`) rather than replace. */
+  appendMode?(): boolean;
 }
 
 /** Mirrors `VALUE_CHAR_CAP` in src/macos/ax.rs. */
@@ -31,8 +35,25 @@ export const VALUE_CHAR_CAP = 2000;
 /** `invalid_ui_element`: the element was destroyed between the read and the act. */
 const GONE = new Set(["element_not_found", "element_changed", "invalid_ui_element"]);
 
+/** A sheet or app-modal window blocks the element (the native act checked; nothing was done). */
+export class ModalBlockingError extends Error {
+  readonly callerDetail: string;
+  constructor(blocker: string | undefined) {
+    super(`modal_blocking: ${blocker ?? "unknown"}`);
+    this.name = "ModalBlockingError";
+    const [kind, ...rest] = (blocker ?? "").split(":");
+    const title = rest.join(":");
+    this.callerDetail =
+      kind === "sheet"
+        ? `A sheet is open on this window${title ? ` ("${title}")` : ""}; nothing behind it was touched. Answer the sheet first: ` +
+          "desktop_discover on the window again, or — when its controls are drawn by another process, as the open/save panel's are — on the sheet's own title (e.g. \"保存\" / \"Save\")."
+        : `A modal window of this app is open${title ? ` ("${title}")` : ""}; nothing was touched. Answer it first (desktop_discover with its title).`;
+  }
+}
+
 function refuse(r: NativeMacActResult, what: string): never {
   const reason = r.reason ?? "unknown";
+  if (reason === "modal_blocking") throw new ModalBlockingError(r.blocker);
   if (GONE.has(reason)) {
     throw new TargetGoneError(
       `${what}: ${reason}`,
@@ -74,6 +95,23 @@ export function createMacAxExecutor(deps: MacAxExecutorDeps): ExecutorFn {
     if (action === "type" || action === "setValue") {
       // `auto` on a type-only field resolves to `type`; without text it must not fall to a press.
       if (text === undefined) throw new MacAxActError(`${action}: no text`, "text_required");
+      if (deps.appendMode?.() === true) {
+        // Append without reading the old text back in: replacing with "old + new" would cut a long
+        // document at the read cap and delete the rest (codex, #782).
+        if (deps.insertText === undefined) throw new MacAxActError("append: not available", "append_unavailable");
+        const r = await deps.insertText(target, text, -1);
+        if (!r.ok) refuse(r, "append");
+        // The read-back is capped, so the end can be checked only when the whole text came back.
+        const after = r.valueAfter;
+        if (after !== undefined && Array.from(after).length < VALUE_CHAR_CAP && !after.endsWith(text)) {
+          throw new ValueNotAppliedError(
+            "append: the field does not end with the text written",
+            undefined,
+            "The app accepted the insertion but the field does not end with the text now."
+          );
+        }
+        return "ax";
+      }
       const r = await deps.setValue(target, text);
       if (!r.ok) refuse(r, "setValue");
       // The native read-back is capped at VALUE_CHAR_CAP characters (src/macos/ax.rs).

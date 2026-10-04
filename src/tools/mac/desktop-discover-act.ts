@@ -22,9 +22,9 @@ export const macDiscoverSchema = {
   target: z
     .object({ windowTitle: z.string().optional() })
     .optional()
-    .describe("Target window by title (case-insensitive substring). Omit for the frontmost app."),
+    .describe("Target window by title (case-insensitive substring; titles are in the user's language — desktop_state lists them). Omit for the frontmost app."),
   view: z.enum(["action", "explore", "debug"]).optional().describe("action (default, ≤20 entities), explore (≤50), debug (includes raw rect)"),
-  query: z.string().optional().describe("Filter entities by label substring (case-insensitive)"),
+  query: z.string().optional().describe("Filter entities by label substring (case-insensitive). Labels only: a text field without a label never matches, so look for role 'textbox' instead."),
   maxEntities: z.number().int().min(1).max(200).optional().describe("Override entity count limit"),
   debug: coercedBoolean().optional().describe("Include raw screen coordinates in response"),
 };
@@ -42,30 +42,44 @@ export const macActSchema = {
   action: z
     .enum(["auto", "invoke", "click", "type", "setValue"])
     .optional()
-    .describe("'click'/'invoke'/'auto' press the element (only one that offers it). 'type' and 'setValue' REPLACE the field's whole value with text."),
+    .describe("'click'/'invoke'/'auto' press the element (only one that offers it). 'type' and 'setValue' REPLACE the field's whole value with text — to add text, use append: true instead of resending the old text (a long field's value from desktop_discover is cut: valueTruncated)."),
   text: z.string().optional().describe("Text to set (required when action='type' or action='setValue')."),
+  append: z
+    .boolean()
+    .optional()
+    .describe("With type/setValue: insert text at the end of the field instead of replacing it; the existing text is not touched."),
 };
 
 export const macDiscoverDescription = buildDesc({
   purpose: "Find the controls of a macOS window you can act on, each with a lease for desktop_act.",
   details:
     "Reads the app's Accessibility tree (no screenshot, no foreground change). Entities carry label (a text's visible text), role " +
-    "(button/textbox/link/menuitem/label) and primaryAction; buttons offer click, settable text fields offer type, texts only read. " +
+    "(button/textbox/link/menuitem/label), primaryAction, and — for a text field — its current value (never a password field's; " +
+    "longer than 2000 characters: no value, valueTruncated: true); " +
+    "buttons offer click, settable text fields offer type, texts only read. Each lease carries expiresAtMs (its life adapts to the view and to how long you take between calls); after it, desktop_act answers lease_expired. " +
     "'warnings' says what the read could not do: display_asleep (macOS then answers windows with the app itself — wake the display and " +
     "discover again), no_window_matches_title, window_titles_unavailable (Screen Recording is not granted, so titles cannot be matched; " +
-    "omit target to read the frontmost app), no_frontmost_app, truncated:*, ax_error:*.",
-  prefer: "Discover right before each act: a lease names the element as read, and an act on an element that moved is refused.",
+    "omit target to read the frontmost app), no_frontmost_app, truncated:*, ax_error:*, sheet_open (answer the sheet first; acts behind it " +
+    "are refused), sheet_open_in_other_process (the sheet's controls belong to another process, e.g. the open/save panel: discover its " +
+    "own title, such as \"Save\" / \"保存\").",
+  prefer:
+    "Discover right before each act: a lease names the element as read, and an act on an element that moved is refused. " +
+    "next:'refresh_view' after an act is advice (the view changed): other leases from the same discover still work while their elements are unchanged.",
   caveats: "Needs Accessibility permission (PermissionRequired otherwise). Window titles need Screen Recording.",
 });
 
 export const macActDescription = buildDesc({
-  purpose: "Act on an entity from desktop_discover: press it, or replace a text field's value.",
+  purpose: "Act on an entity from desktop_discover: press it, replace a text field's value, or append to it (append: true).",
   details:
     "Acts through Accessibility on the background app — the foreground is not taken. Refused with entity_not_found when the element's window " +
     "or the element at that place changed since the discover (nothing was done; discover again), and action_not_offered when the entity does not " +
-    "offer the action (type on a button, click on a text). value_not_applied: the app took the write but the field does not hold the text " +
-    "(it may reformat it, e.g. 1.50 shown as 1.5). Not checked: a sheet or dialog that opened over the window after the discover.",
-  prefer: "Call desktop_state or desktop_discover afterwards to confirm.",
+    "offer the action (type on a button, click on a text), and modal_blocking when a sheet or an app-modal window is open over it " +
+    "(answer that first). value_not_applied: the app took the write but the field does not hold the text " +
+    "(it may reformat it, e.g. 1.50 shown as 1.5). A sheet or app-modal window is checked at the act itself, so one that opened after " +
+    "the discover still refuses.",
+  prefer:
+    "Send acts one at a time: each act can change the view, so acts sent together can refuse each other (entity_not_found; nothing was done). " +
+    "Call desktop_state or desktop_discover afterwards to confirm. A write changes the field, not the file: saving is not done or reported.",
 });
 
 /**
@@ -79,6 +93,8 @@ export interface MacFacadeState {
   last?: MacAxReadNotes;
   phase: "discover" | "act";
   noTargetPid?: number;
+  /** desktop_act `append: true` for the act in progress (acts run one at a time). */
+  append?: boolean;
 }
 
 export function createMacFacade(mac: NativeMac, state: MacFacadeState): DesktopFacade {
@@ -106,6 +122,8 @@ export function createMacFacade(mac: NativeMac, state: MacFacadeState): DesktopF
     executorFn: createMacAxExecutor({
       perform: (t, a) => mac.macAxPerform(t, a),
       setValue: (t, v) => mac.macAxSetValue(t, v),
+      insertText: (t, text, at) => mac.macAxInsertText(t, text, at),
+      appendMode: () => state.append === true,
     }),
   });
 }
@@ -152,8 +170,18 @@ async function macDiscoverOnce(
   const output = await facade.see(input.view === "debug" ? { ...input, debug: true } : input);
   const notes = state.last as MacAxReadNotes | undefined;
   const warnings = [...((output as { warnings?: string[] }).warnings ?? []), ...(notes?.warnings ?? [])];
+  const values = notes?.values ?? {};
+  const truncated = new Set(notes?.truncated ?? []);
+  const entities = output.entities.map((e) =>
+    values[e.entityId] !== undefined
+      ? { ...e, value: values[e.entityId] }
+      : truncated.has(e.entityId)
+        ? { ...e, valueTruncated: true }
+        : e
+  );
   return ok({
     ...output,
+    entities,
     ...(warnings.length > 0 && { warnings }),
     ...(notes?.appTitle !== undefined && { app: { title: notes.appTitle, pid: notes.pid } }),
   });
@@ -163,7 +191,7 @@ export function macActHandler(
   mac: NativeMac,
   facade: DesktopFacade,
   state: MacFacadeState,
-  input: { lease: unknown; action?: string; text?: string }
+  input: { lease: unknown; action?: string; text?: string; append?: boolean }
 ): Promise<ToolResult> {
   return serialise(() => macActOnce(mac, facade, state, input));
 }
@@ -172,7 +200,7 @@ async function macActOnce(
   mac: NativeMac,
   facade: DesktopFacade,
   state: MacFacadeState,
-  input: { lease: unknown; action?: string; text?: string }
+  input: { lease: unknown; action?: string; text?: string; append?: boolean }
 ): Promise<ToolResult> {
   const denied = permissionGate(mac, "desktop_act");
   if (denied) return denied;
@@ -183,7 +211,14 @@ async function macActOnce(
   }
   state.phase = "act";
   state.last = undefined;
-  const result = await facade.touch(input as Parameters<DesktopFacade["touch"]>[0]);
+  state.append = input.append === true;
+  const { append: _append, ...touchInput } = input;
+  let result;
+  try {
+    result = await facade.touch(touchInput as Parameters<DesktopFacade["touch"]>[0]);
+  } finally {
+    state.append = false;
+  }
   return ok(qualifyPostRead(result, state.last));
 }
 
