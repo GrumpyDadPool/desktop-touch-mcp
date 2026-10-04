@@ -6,6 +6,8 @@ import {
   canCaptureWindowViaWgc,
   captureScreenRegion,
   getPrimaryMonitorBounds,
+  getVisibleFrameRectByHwnd,
+  getWindowRectByHwnd,
 } from "./win32.js";
 import { nativeEngine } from "./native-engine.js";
 import {
@@ -510,6 +512,51 @@ export function isLikelyBlankCapture(
 
 export type CaptureSource = "printwindow" | "bitblt-fallback" | "wgc";
 export type CaptureFallbackReason = "printwindow-failed" | "printwindow-all-black" | null;
+
+type ScreenRect = { x: number; y: number; width: number; height: number };
+
+/**
+ * Internal #246 — the screen rectangle a captured frame covers.
+ *
+ * PrintWindow (and BitBlt of the window's rect) render the whole `GetWindowRect`, invisible resize
+ * border included. A Windows Graphics Capture frame is cropped to its content, which starts at the
+ * window's visible DWM frame — 7 px inside the rect on win2's machine (internal #243), so mapping a
+ * WGC pixel through the rect put it 7 px off, and stretched it by rect/frame. For a WGC frame this
+ * answers the visible frame, or `null` when that cannot be read (the caller then has no rectangle
+ * to map through); for any other source, `windowRect`.
+ */
+export function capturedFrameRect(
+  hwnd: unknown,
+  source: CaptureSource,
+  windowRect: ScreenRect,
+  /**
+   * The whole captured image's size (not a crop of it), when known. A WGC frame whose shape is not
+   * the visible frame's — a maximised window, a resize between capture and read — is not mapped
+   * through it: `null` (gate 2 on #770). The rect differs from the frame by ~1 % in shape at a 7 px
+   * border, so the tolerance (0.5 %) catches the rect too; downscaling keeps the shape.
+   */
+  captured?: { width: number; height: number },
+): ScreenRect | null {
+  if (source !== "wgc") return windowRect;
+  if (typeof hwnd !== "bigint") return null;
+  // `windowRect` was read before the capture and the frame is read after it: a window that moved or
+  // resized in between would give pixels from the old place the new place's corner (codex on
+  // d5b63769). Not the same rect now → not mapped.
+  const now = getWindowRectByHwnd(hwnd);
+  if (
+    !now ||
+    now.x !== windowRect.x || now.y !== windowRect.y ||
+    now.width !== windowRect.width || now.height !== windowRect.height
+  ) {
+    return null;
+  }
+  const frame = getVisibleFrameRectByHwnd(hwnd);
+  if (frame && captured && captured.width > 0 && captured.height > 0) {
+    const shape = (frame.width * captured.height) / (frame.height * captured.width);
+    if (Math.abs(shape - 1) > 0.005) return null;
+  }
+  return frame;
+}
 
 // ADR-027: once a WGC attempt reports the OS doesn't support WGC, skip it for
 // the rest of the session rather than paying a futile worker round-trip on

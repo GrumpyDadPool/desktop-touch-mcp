@@ -16,11 +16,12 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
-const { mockEnumWindowsInZOrder, mockGetWindowTitleW, mockGetWindowRectByHwnd, mockIsWindowProcessFrozen, mockHasBuffer, mockCaptureAllLayers, mockCaptureAndDiff, mockUpdateWindowCache, mockSaveSnapshot, mockGetWindows, mockResolveWindowTarget, mockCaptureWindowBackground, mockCaptureWindowWithFallback } = vi.hoisted(() => ({
+const { mockEnumWindowsInZOrder, mockGetWindowTitleW, mockGetWindowRectByHwnd, mockIsWindowProcessFrozen, mockVisibleFrame, mockHasBuffer, mockCaptureAllLayers, mockCaptureAndDiff, mockUpdateWindowCache, mockSaveSnapshot, mockGetWindows, mockResolveWindowTarget, mockCaptureWindowBackground, mockCaptureWindowWithFallback } = vi.hoisted(() => ({
   mockEnumWindowsInZOrder: vi.fn(),
   mockGetWindowTitleW: vi.fn(),
   mockGetWindowRectByHwnd: vi.fn(),
   mockIsWindowProcessFrozen: vi.fn(),
+  mockVisibleFrame: vi.fn(),
   mockHasBuffer: vi.fn(),
   mockCaptureAllLayers: vi.fn(),
   mockCaptureAndDiff: vi.fn(),
@@ -67,6 +68,8 @@ vi.mock("../../src/engine/image.js", () => ({
   captureScreen: vi.fn(),
   captureDisplay: vi.fn(),
   captureWindowWithFallback: mockCaptureWindowWithFallback,
+  // Internal #246: the real rule (a WGC frame covers the visible frame), with that frame mocked.
+  capturedFrameRect: (_hwnd: unknown, source: string, rect: unknown) => (source === "wgc" ? mockVisibleFrame() : rect),
 }));
 
 const { screenshotHandler, screenshotBgHandler, screenshotOcrHandler } = await import("../../src/tools/screenshot.js");
@@ -163,9 +166,43 @@ describe("mode='background' — captures the window it resolved (internal #243)"
     expect(link?.description).toContain("click coordinates");
   });
 
-  it("gives a WGC frame no screen origin: it starts at the visible frame, 7 px inside the rect", async () => {
+  // Internal #246: win2 measured the WGC frame starting at the visible frame, 7 px right of the rect.
+  it("gives a WGC frame its visible frame's corner as the origin, not the rect's", async () => {
     mockResolveWindowTarget.mockResolvedValue({ title: "Target", hwnd: 4242n, warnings: [] });
     mockGetWindowRectByHwnd.mockReturnValue({ x: 10, y: 20, width: 300, height: 200 });
+    mockVisibleFrame.mockReset().mockReturnValue({ x: 17, y: 20, width: 286, height: 193 });
+    mockCaptureWindowBackground.mockResolvedValue({
+      base64: B64, mimeType: "image/png", width: 286, height: 193, source: "wgc",
+    });
+
+    const result = await screenshotBgHandler({
+      hwnd: "4242", maxDimension: 768, dotByDot: true, grayscale: false, webpQuality: 60, fullContent: true,
+    });
+    const text = result.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("\n");
+    expect(text).toContain("origin: (17, 20)");
+    expect(text).not.toContain("origin: (10, 20)");
+  });
+
+  // Codex on c183454c: the crop clamps a negative region offset to 0; the origin added it raw.
+  it("adds the crop's clamped offset to the origin, not a negative region offset", async () => {
+    mockResolveWindowTarget.mockResolvedValue({ title: "Target", hwnd: 4242n, warnings: [] });
+    mockGetWindowRectByHwnd.mockReturnValue({ x: 10, y: 20, width: 300, height: 200 });
+    mockCaptureWindowBackground.mockResolvedValue({
+      base64: B64, mimeType: "image/png", width: 50, height: 40, source: "printwindow",
+    });
+
+    const result = await screenshotBgHandler({
+      hwnd: "4242", maxDimension: 768, dotByDot: true, grayscale: false, webpQuality: 60, fullContent: false,
+      region: { x: -5, y: -3, width: 50, height: 40 },
+    });
+    const text = result.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("\n");
+    expect(text).toContain("origin: (10, 20)");
+  });
+
+  it("gives a WGC frame no screen origin when its visible frame cannot be read", async () => {
+    mockResolveWindowTarget.mockResolvedValue({ title: "Target", hwnd: 4242n, warnings: [] });
+    mockGetWindowRectByHwnd.mockReturnValue({ x: 10, y: 20, width: 300, height: 200 });
+    mockVisibleFrame.mockReset().mockReturnValue(null);
     mockCaptureWindowBackground.mockResolvedValue({
       base64: B64, mimeType: "image/png", width: 286, height: 193, source: "wgc",
     });
@@ -196,6 +233,26 @@ describe("mode='background' — captures the window it resolved (internal #243)"
     const link = result.content.find((c) => c.type === "resource_link") as { description?: string } | undefined;
     expect(link?.description).toBeDefined();
     expect(link?.description).not.toContain("click coordinates");
+  });
+
+  // Gate 2 on 556d72b5: nut-js clamps a window's region to the primary monitor; the title road took
+  // its origin from there.
+  it("without a resolved window, takes the window's own rect, not nut-js's clamped region", async () => {
+    mockResolveWindowTarget.mockResolvedValue(null);
+    mockGetWindows.mockResolvedValue([
+      { windowHandle: 777, title: Promise.resolve("Other"), region: Promise.resolve({ left: 0, top: 0, width: 600, height: 480 }) },
+    ]);
+    mockGetWindowTitleW.mockReturnValue("Other");
+    mockGetWindowRectByHwnd.mockReset().mockReturnValue({ x: -1700, y: 120, width: 640, height: 480 });
+    mockCaptureWindowBackground.mockResolvedValue({
+      base64: B64, mimeType: "image/png", width: 640, height: 480, source: "printwindow",
+    });
+
+    const result = await screenshotBgHandler({
+      windowTitle: "Other", maxDimension: 768, dotByDot: true, grayscale: false, webpQuality: 60, fullContent: false,
+    });
+    const text = result.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("\n");
+    expect(text).toContain("origin: (-1700, 120)");
   });
 
   it("without a resolved window, turns nut-js's number handle into a BigInt before any native call", async () => {
@@ -305,6 +362,21 @@ describe("capture-blocked surfacing — normal path (ADR-027 Phase 3 / AC8)", ()
     expect(hints?.captureBlocked).toBeUndefined();
     const warnings = (hints?.warnings ?? []).join(" | ");
     expect(warnings).toMatch(/pass mode='background'/i);
+  });
+
+  // Internal #246: normal mode's WGC rescue printed the rect's corner as its origin.
+  it("a WGC rescue frame's dot-by-dot origin is the visible frame's corner", async () => {
+    wireWindow();
+    mockVisibleFrame.mockReset().mockReturnValue({ x: 7, y: 0, width: 786, height: 593 });
+    mockCaptureWindowWithFallback.mockResolvedValue({
+      base64: B64, mimeType: "image/png", width: 786, height: 593,
+      source: "wgc", fallbackReason: "printwindow-all-black", captureBlocked: false,
+    });
+
+    const result = await screenshotHandler({ ...baseArgs, windowTitle: "My App", detail: "image", confirmImage: false, dotByDot: true });
+    const text = result.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("\n");
+    expect(text).toContain("origin: (7, 0)");
+    expect(text).not.toContain("origin: (0, 0)");
   });
 
   it("captureBlocked=false + printwindow source → no capture warning, no captureBlocked hint", async () => {
