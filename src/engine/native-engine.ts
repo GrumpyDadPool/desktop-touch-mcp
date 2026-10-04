@@ -64,6 +64,15 @@ import type {
   NativeDirtyRectSubscription,
   NativeExcelAccessVbomStatus,
   NativeWtsSessionInfo,
+  NativeMacPermissions,
+  NativeMacWindow,
+  NativeMacFocus,
+  NativeMacAxTreeOptions,
+  NativeMacAxTree,
+  NativeMacAxTarget,
+  NativeMacActResult,
+  NativeMacCaptureOptions,
+  NativeMacCaptureResult,
 } from "./native-types.js";
 
 export type * from "./native-types.js";
@@ -491,6 +500,26 @@ export const nativeEngine: NativeEngine | null =
     ? (nativeBinding as unknown as NativeEngine)
     : null;
 
+/** Mac port (src/macos/): the macOS-only exports, present only in the darwin addon. */
+export interface NativeMac {
+  macPermissions(): NativeMacPermissions;
+  macDisplayAsleep(): boolean;
+  macListWindows(onScreenOnly?: boolean): NativeMacWindow[];
+  macGetFocus(): Promise<NativeMacFocus>;
+  macAxTree(opts: NativeMacAxTreeOptions): Promise<NativeMacAxTree>;
+  macAxPerform(target: NativeMacAxTarget, action: string): Promise<NativeMacActResult>;
+  macAxSetValue(target: NativeMacAxTarget, value: string): Promise<NativeMacActResult>;
+  macAxInsertText(target: NativeMacAxTarget, text: string, at?: number): Promise<NativeMacActResult>;
+  macPostText(pid: number, text: string): boolean;
+  macPostKey(pid: number, keyCode: number, flags?: number): boolean;
+  macCaptureWindow(opts: NativeMacCaptureOptions): Promise<NativeMacCaptureResult>;
+}
+
+export const nativeMac: NativeMac | null =
+  nativeBinding && typeof nativeBinding.macAxTree === "function" && typeof nativeBinding.macDisplayAsleep === "function"
+    ? (nativeBinding as unknown as NativeMac)
+    : null;
+
 /**
  * `DESKTOP_TOUCH_DISABLE_NATIVE_UIA=1` takes the native UIA engine out even when the addon carries it,
  * and leaves the rest of the binding (win32, capture, image diff, …) loaded — the state of an addon
@@ -869,7 +898,8 @@ export const nativeDuplication: NativeDuplication | null =
     : null;
 
 if (nativeEngine) {
-  console.error("[native-engine] Rust image-diff engine loaded (SSE2 SIMD)");
+  // The SSE2 path is x86_64 only (src/pixel_diff.rs); arm64 (the Mac port) runs the scalar one.
+  console.error(`[native-engine] Rust image-diff engine loaded (${process.arch === "x64" ? "SSE2 SIMD" : "scalar"})`);
 }
 if (nativeUia) {
   console.error("[native-engine] Rust UIA engine loaded");
