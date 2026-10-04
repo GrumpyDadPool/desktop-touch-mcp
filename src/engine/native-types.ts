@@ -924,3 +924,139 @@ export interface NativeExcelAccessVbomStatus {
   /** `"hklm-policy"` (HKLM dictates), `"hkcu"` (HKLM unset, HKCU is 1), or `"default"` (neither set). */
   scope: string
 }
+
+// ─── Mac port M1 (macOS only; internal docs/mac-port-design.md) ─────────────
+// AX / CGWindowList / CGEvent / ScreenCaptureKit, from src/macos/. These
+// functions exist only in the darwin addon.
+
+/** Screen rectangle in points, top-left origin (the AX coordinate space). */
+export interface NativeMacRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface NativeMacPermissions {
+  /** Accessibility, granted to the host process (Terminal, the Claude app). */
+  accessibility: boolean
+  /** Screen Recording: window titles from CGWindowList, and capture. */
+  screenCapture: boolean
+}
+
+export interface NativeMacWindow {
+  windowId: number
+  pid: number
+  ownerName?: string
+  /** Empty without Screen Recording permission. */
+  title?: string
+  bounds?: NativeMacRect
+  layer: number
+  onScreen: boolean
+  alpha?: number
+}
+
+export interface NativeMacFocus {
+  pid?: number
+  appTitle?: string
+  focusedRole?: string
+  focusedTitle?: string
+  focusedWindowTitle?: string
+  /** `system_wide`, or `app_scan` when the system-wide AX element did not answer. */
+  source?: string
+  error?: string
+}
+
+export interface NativeMacAxTreeOptions {
+  pid: number
+  /** Default 3000; `truncated` says when it stopped. */
+  maxElements?: number
+  /** Default 40. */
+  maxDepth?: number
+  /** Default false. */
+  includeMenuBar?: boolean
+  /** Per-message AX timeout, default 3. */
+  timeoutSecs?: number
+  /** Budget for the whole walk, default 15000. */
+  maxMs?: number
+}
+
+export interface NativeMacAxElement {
+  /** Child-index path: `a.<i>...` from the app, `f...` / `m...` from the focused / main window. */
+  id: string
+  /** The key of the root (window) this element is under; pass it back as `expectedRootKey`. */
+  rootKey: string
+  /** What this element is (subrole, identifier, title, description, frame); pass it back as `expectedElementKey`. */
+  elementKey: string
+  depth: number
+  role: string
+  subrole?: string
+  title?: string
+  description?: string
+  value?: string
+  identifier?: string
+  frame?: NativeMacRect
+  enabled?: boolean
+  focused?: boolean
+  actions: string[]
+  valueSettable: boolean
+  childCount: number
+}
+
+export interface NativeMacAxTree {
+  pid: number
+  appTitle?: string
+  elements: NativeMacAxElement[]
+  truncated: boolean
+  /** `max_elements`, `max_depth` or `max_ms`. */
+  stoppedBy?: string
+  /** A child equal to one of its ancestors was skipped. */
+  selfReference: boolean
+  /** The main display was asleep: AX then answers windows with the app element. */
+  displayAsleep: boolean
+  /** AX could not be read at all (`api_disabled`, `cannot_complete`, ...). */
+  error?: string
+  elapsedMs: number
+}
+
+export interface NativeMacAxTarget {
+  pid: number
+  id: string
+  /** The role read for `id`. */
+  expectedRole: string
+  /** The `rootKey` read for `id`. */
+  expectedRootKey: string
+  /** The `elementKey` read for `id`; the act is refused (`element_changed`) when it, the root key or the role differs now. */
+  expectedElementKey: string
+  timeoutSecs?: number
+}
+
+export interface NativeMacActResult {
+  ok: boolean
+  /** `element_not_found`, `element_changed`, `action_not_advertised`,
+   *  `value_not_settable`, `selection_not_settable`, `length_unknown`, or an AX error name. */
+  reason?: string
+  valueAfter?: string
+  role?: string
+}
+
+export interface NativeMacCaptureOptions {
+  windowId: number
+  /** Pixels per point; default the window's display scale. */
+  scale?: number
+  /** For the whole capture, default 5000. */
+  timeoutMs?: number
+}
+
+export interface NativeMacCaptureResult {
+  ok: boolean
+  /** `window_not_found`, `timeout`, `unsupported_os` (before macOS 14), `app_init`, or `sck_error <code>: <text>`. */
+  reason?: string
+  /** RGBA top-down, opaque; length = width * height * 4. */
+  data?: Buffer
+  width: number
+  height: number
+  frame?: NativeMacRect
+  onScreen?: boolean
+  elapsedMs: number
+}
