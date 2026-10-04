@@ -44,7 +44,7 @@ npx -y @harusame64/desktop-touch-mcp
 
 | | |
 |---|---|
-| OS | Windows 10 / 11 (64-bit). **macOS 14+ on Apple Silicon: preview** — see [macOS (preview)](#macos-preview) |
+| OS | Windows 10 / 11 (64-bit). **macOS 14+ on Apple Silicon: limited preview, 4 tools only** — see [macOS (preview)](#macos-preview) |
 | Node.js | v20+ recommended (tested on v22+) — **to develop or run the test suite, `^22.12 || ^24 || >=26`** — the test runner's own range since #658, which excludes odd majors such as 23 and 25 |
 | PowerShell | 5.1+ (bundled with Windows) — used only as fallback when the Rust native engine is unavailable |
 | Claude CLI | `claude` command must be available |
@@ -180,9 +180,16 @@ For a local checkout, register the built server directly:
 
 ## macOS (preview)
 
+> **Limited preview.** The macOS build has only 4 of the tools — a small subset of the Windows build — and its behaviour may change between releases.
+
 On an Apple Silicon Mac (macOS 14 or later) the same `npx` command starts a macOS server with four tools: `desktop_state`, `desktop_discover`, `desktop_act` (press, replace or append text) and `screenshot` (one window). The other tools are Windows-only and are not listed on macOS.
 
-- Grant **Accessibility** — and **Screen Recording** for window titles and screenshots — to the app that runs the server (Terminal, iTerm, VS Code, the Claude app, …) in System Settings › Privacy & Security, then restart it. Until then the tools answer `PermissionRequired` and say what to grant.
+- Grant **Accessibility** — and **Screen Recording** for window titles and screenshots — to the app that runs the server (Terminal, iTerm, VS Code, the Claude app, …) in System Settings › Privacy & Security. On recent macOS the Accessibility pane can have another name; these commands open the two panes directly:
+  ```bash
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+  ```
+  Then **restart the MCP server** — restart or reconnect it in your client, or restart the app that runs it: a server that was already running did not see a new Accessibility grant. If screenshots still fail after granting Screen Recording, quit and reopen that app. Until then the tools answer `PermissionRequired` and say what to grant.
 - Install with `npx` only: a release zip downloaded with a browser is refused by Gatekeeper (the native module is not notarized).
 - stdio only (`--http` is not available yet). Intel Macs and Linux are not supported.
 

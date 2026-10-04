@@ -43,7 +43,7 @@ npx -y @harusame64/desktop-touch-mcp
 
 | 項目 | 要件 |
 |---|---|
-| OS | Windows 10 / 11 (64-bit)。**Apple Silicon の macOS 14 以降はプレビュー** — [macOS（プレビュー）](#macosプレビュー) を参照 |
+| OS | Windows 10 / 11 (64-bit)。**Apple Silicon の macOS 14 以降は機能を絞ったプレビュー（ツール4つのみ）** — [macOS（プレビュー）](#macosプレビュー) を参照 |
 | Node.js | v20 以上推奨 (v22+ で動作確認済み) — **開発と試験の実行には `^22.12 || ^24 || >=26`**（#658 以降の試験の走り手の範囲。23 や 25 のような奇数メジャーは外れる） |
 | PowerShell | 5.1 以上 (Windows 標準同梱) — Rust ネイティブエンジン不在時のフォールバック用 |
 | Claude CLI | `claude` コマンドが使えること |
@@ -172,9 +172,16 @@ npm run build
 
 ## macOS（プレビュー）
 
+> **機能を絞ったプレビューです。** macOS 版のツールは4つだけで、Windows 版のごく一部です。挙動はリリースのあいだに変わることがあります。
+
 Apple Silicon の Mac（macOS 14 以降）では、同じ `npx` で macOS 用のサーバーが起動します。使えるツールは `desktop_state`・`desktop_discover`・`desktop_act`（押す・文字の置き換え／追記）・`screenshot`（ウィンドウ1枚）の4つです。ほかのツールは Windows 専用で、macOS では一覧に出ません。
 
-- サーバーを動かすアプリ（ターミナル、iTerm、VS Code、Claude アプリなど）に、システム設定 › プライバシーとセキュリティ で **アクセシビリティ** を、ウィンドウのタイトルとスクリーンショットには **画面収録** も許可し、アプリを再起動してください。許可がないあいだ、ツールは `PermissionRequired` と、何を許可すればよいかを返します。
+- サーバーを動かすアプリ（ターミナル、iTerm、VS Code、Claude アプリなど）に、システム設定 › プライバシーとセキュリティ で **アクセシビリティ** を、ウィンドウのタイトルとスクリーンショットには **画面収録** も許可してください。最近の macOS では名前が変わっていることがあります（macOS 27 では「デバイスの制御とデータへのアクセス」と「画面収録とシステムオーディオ録音」）。次のコマンドで、それぞれの画面を直接開けます:
+  ```bash
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+  ```
+  許可したら、**MCP サーバーを再起動**してください（MCP クライアントで再起動・再接続するか、サーバーを動かしているアプリを再起動）。動いていたサーバーは、あとから付けたアクセシビリティの許可を見ませんでした。画面収録を許可してもスクリーンショットが失敗するときは、そのアプリを終了して開き直してください。許可がないあいだ、ツールは `PermissionRequired` と、何を許可すればよいかを返します。
 - インストールは `npx` だけにしてください。ブラウザでダウンロードしたリリースの zip は Gatekeeper に拒否されます（ネイティブモジュールは公証していません）。
 - stdio のみです（`--http` はまだ使えません）。Intel の Mac と Linux には対応していません。
 
