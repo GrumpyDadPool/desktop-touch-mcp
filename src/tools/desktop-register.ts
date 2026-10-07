@@ -23,7 +23,7 @@ import {
 } from "../engine/landing-advice.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { coercedBoolean } from "./_coerce.js";
-import { failCode, getSuggestsForCode } from "./_errors.js";
+import { executorFailedAdviceFor, failCode, getSuggestsForCode } from "./_errors.js";
 import { DesktopFacade, type CandidateProvider, type DesktopSeeInput, type DesktopWindowMeta } from "./desktop.js";
 import type {
   EntityLease,
@@ -1267,9 +1267,15 @@ const desktopActRawHandlerInner = async (
   // handler-returned ok:false as a failure, which is the Phase 5 TOOL_REGISTRY
   // Result-returning change (ADR-021 §2.2 deferred).
   if (!result.ok && result.reason === "executor_failed") {
+    // internal #242 — the advice for THIS act: its action, and whether any route ran. The reason's
+    // own list told a type that no route could carry that routes had been tried, and offered clicks.
     const failure = toFailureEnvelope(
       Err(new ExecutorFailedError("desktop_act executor failed")),
-      { optIn: false, detail: result.detail },
+      {
+        optIn: false,
+        detail: result.detail,
+        tryNext: executorFailedAdviceFor(input.action, result.noRouteTried === true).map((action) => ({ action })),
+      },
     );
     return {
       content: [{ type: "text" as const, text: JSON.stringify(failure, null, 2) }],
@@ -2158,7 +2164,7 @@ export function registerDesktopTools(server: McpServer): void {
       "  action_not_offered → the target does not offer this action and NOTHING WAS DONE — no road was taken, so it is not a failed executor. Ask for what you mean: action='click' / 'invoke' presses it; the entity's affordances say which actions it offers. No provider advertises 'select', so a select on any target is this refusal. A type or setValue on a control UI Automation reports as a button, check box, radio button, hyperlink or menu item is this refusal too: none of them takes text, and nothing was typed;",
       "  value_not_applied → the write was accepted and nothing read back changed: a type or setValue through the native UI Automation client to a control that is not a text field (not Edit or Document) whose value read back unchanged for a moment after the write (nothing else was tried), or a type into Word's body after which the visible page text read back unchanged (it may have landed out of view). Do not retry it or type into the same control another way (on a WinForms NumericUpDown a keystroke landed at its caret); look at the field or document, or re-call desktop_discover, before writing again;",
       "  window_excluded → this window is excluded from every tool surface of this server (the key locker's own windows are); nothing was clicked and no route here can click it. Act on another window;",
-      "  executor_failed → fall back to V1 tools (click_element / mouse_click / browser_click);",
+      "  executor_failed → when if_unexpected.detail begins 'Nothing was typed', no route ran and nothing was typed: do what detail says. Otherwise the road this act took failed: for a click or invoke fall back to V1 tools (click_element / mouse_click / browser_click); for a type or setValue, focus the field and use V1 keyboard(action='type', method='foreground'). if_unexpected.try_next carries the lines for this act;",
       "  executor_failed on terminal textbox (action=type) → use V1 terminal(action='send') instead — but never after foreground_not_allowed: terminal send pastes into Windows Terminal without asking;",
       "  unknown → the handler threw before any road named a cause; it is NOT a refusal this tool decided, so it does NOT say the act was skipped — it may have taken effect before the throw. Observe the target again before acting, and do not repeat the call as a retry until you have; if_unexpected.try_next names the instrument for the kind of target.",
       "Check desktop_discover response.constraints for pre-emptive fallback hints before calling desktop_act.",

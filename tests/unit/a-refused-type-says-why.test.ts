@@ -8,11 +8,17 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { createDesktopExecutor, type ExecutorDeps } from "../../src/tools/desktop-executor.js";
+import {
+  createDesktopExecutor,
+  KeyboardCannotReplaceError,
+  KeyboardHostUnavailableError,
+  NoTextRouteError,
+  type ExecutorDeps,
+} from "../../src/tools/desktop-executor.js";
 import { GuardedTouchLoop, type TouchEnvironment } from "../../src/engine/world-graph/guarded-touch.js";
 import { LeaseStore } from "../../src/engine/world-graph/lease-store.js";
 import type { UiEntity } from "../../src/engine/world-graph/types.js";
-import { getSuggestsForCode } from "../../src/tools/_errors.js";
+import { executorFailedAdviceFor, getSuggestsForCode } from "../../src/tools/_errors.js";
 
 const body: UiEntity = {
   entityId: "body",
@@ -90,11 +96,91 @@ describe("a type no route can carry", () => {
       execute: (e, action, text) => exec(e, action, text),
     };
     const result = await new GuardedTouchLoop(store, env).touch({ lease, action: "type", text: "x" });
-    expect(result).toEqual({ ok: false, reason: "executor_failed", diff: [], detail: detailFor(WORD_BODY_ROUTES, TYPE_INSTEAD) });
+    // internal #242: `noRouteTried` rides along, so the advice can say nothing was tried.
+    expect(result).toEqual({ ok: false, reason: "executor_failed", diff: [], detail: detailFor(WORD_BODY_ROUTES, TYPE_INSTEAD), noRouteTried: true });
+  });
+
+  // Gate 2 on #792: the marker on the two keyboard-road refusals had no cell — removing it from
+  // either left every test green. Each of the three is thrown through the loop here.
+  const ALL_THREE: Array<[string, () => Error]> = [
+    ["NoTextRouteError", () => new NoTextRouteError(body, "type", { uia: "blocked", cdp: "no-selector", terminal: "no-source", keyboard: "not-in-preferred" })],
+    ["KeyboardCannotReplaceError", () => new KeyboardCannotReplaceError(body)],
+    ["KeyboardHostUnavailableError (not usable)", () => new KeyboardHostUnavailableError(body)],
+    ["KeyboardHostUnavailableError (cannot post)", () => new KeyboardHostUnavailableError(body, "cannot_post")],
+  ];
+  for (const [name, make] of ALL_THREE) {
+    it(`carries noRouteTried for ${name}, a refusal made before any route ran (internal #242)`, async () => {
+      const store = new LeaseStore({ nowFn: () => 0, defaultTtlMs: 60_000 });
+      const lease = store.issue(body, "v1");
+      const env: TouchEnvironment = {
+        resolveLiveEntities: () => [body],
+        currentGeneration: () => "gen-1",
+        isModalBlocking: () => false,
+        checkViewport: () => null,
+        execute: async () => { throw make(); },
+      };
+      const result = await new GuardedTouchLoop(store, env).touch({ lease, action: "type", text: "x" });
+      expect(result).toMatchObject({ ok: false, reason: "executor_failed", noRouteTried: true });
+      // The server instructions, the desktop_act description and the guides tell a caller to
+      // recognise this case by detail beginning "Nothing was typed" (gate 2 round 2 on #792:
+      // they first keyed on "no route was tried", which only one of the three says).
+      expect((result as { detail?: string }).detail).toMatch(/^Nothing was typed/);
+    });
+  }
+
+  it("does not claim no route was tried for a throw that does not say so (internal #242)", async () => {
+    const store = new LeaseStore({ nowFn: () => 0, defaultTtlMs: 60_000 });
+    const lease = store.issue(body, "v1");
+    const env: TouchEnvironment = {
+      resolveLiveEntities: () => [body],
+      currentGeneration: () => "gen-1",
+      isModalBlocking: () => false,
+      checkViewport: () => null,
+      execute: async () => { throw new Error("a route ran and failed"); },
+    };
+    const result = await new GuardedTouchLoop(store, env).touch({ lease, action: "type", text: "x" });
+    expect(result).toEqual({ ok: false, reason: "executor_failed", diff: [] });
   });
 });
 
 describe("the advice", () => {
+  // internal #242 — the list is chosen for the act. A caller reading it, not its conditionals, was
+  // told routes were tried that never ran, and was offered clicks for a type.
+  const CLICK_REMEDY = /mouse_click|click_element/;
+  const ROUTES_TRIED = /has already tried/;
+
+  it("says only 'follow detail' when no route was tried, whatever the action", () => {
+    for (const action of ["type", "setValue", "click", "auto", undefined]) {
+      const lines = executorFailedAdviceFor(action, true);
+      expect(lines, String(action)).toHaveLength(1);
+      expect(lines[0], String(action)).toMatch(/^Nothing was typed and no route was tried: detail says why .* follow it$/);
+    }
+  });
+
+  it("offers no click remedy for a type or setValue whose route ran, and keeps the ladder", () => {
+    for (const action of ["type", "setValue"]) {
+      const lines = executorFailedAdviceFor(action, false);
+      expect(lines.some((l) => CLICK_REMEDY.test(l.replace(/Focus the target window first with focus_window or mouse_click$/, ""))), action).toBe(false);
+      expect(lines.some((l) => ROUTES_TRIED.test(l)), action).toBe(true);
+      // A stale locator is a cause for a type as much as for a click (gate 2: dropping it was green).
+      expect(lines.some((l) => l.startsWith("Re-run {tool:reidentify_element}")), action).toBe(true);
+    }
+  });
+
+  it("offers no type ladder for a click, and keeps the click remedies", () => {
+    for (const action of ["click", "invoke"]) {
+      const lines = executorFailedAdviceFor(action, false);
+      expect(lines.some((l) => ROUTES_TRIED.test(l)), action).toBe(false);
+      expect(lines.some((l) => CLICK_REMEDY.test(l)), action).toBe(true);
+    }
+  });
+
+  it("answers the whole list where the action does not say which road (auto, select, absent)", () => {
+    for (const action of ["auto", "select", undefined]) {
+      expect(executorFailedAdviceFor(action, false), String(action)).toEqual(getSuggestsForCode("ExecutorFailed"));
+    }
+  });
+
   it("defers to detail when no route was tried, and says whose the two rungs are", () => {
     const line = getSuggestsForCode("ExecutorFailed").find((l) => l.startsWith("For action='type'"));
     expect(line).toMatch(/^For action='type' or action='setValue': when detail says no route was tried, follow it\. Otherwise, on a UI Automation element desktop_act has already tried/);
