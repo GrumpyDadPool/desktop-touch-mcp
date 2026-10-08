@@ -179,6 +179,40 @@ describe("readMacAxCandidates", () => {
     expect(notes.warnings).not.toContain("title_matches_nothing_readable");
   });
 
+  it("refuses a sheet under a window and another, same-titled, only as the focused window: two documents (codex on #805)", async () => {
+    // The native read no longer lists a focused sheet whose parent is a listed window as a root of
+    // its own (roots, src/macos/ax.rs), so an `f` sheet here belongs to another document.
+    const d = mk();
+    d.listWindows.mockReturnValue([{ windowId: 2, pid: 7, layer: 0, onScreen: true, title: "保存" }]);
+    d.axTree.mockResolvedValue(
+      tree({
+        elements: [
+          ...withSheet().elements,
+          el({ id: "f", rootKey: "\u001f\u001f0,0,1,1", role: "AXSheet", title: "保存" }),
+          el({ id: "f.0.12", rootKey: "\u001f\u001f0,0,1,1", actions: ["AXPress"], title: "削除" }),
+        ],
+      })
+    );
+    const { r, notes } = await run(d, { windowTitle: "保存" });
+    expect(r).toEqual([]);
+    expect(notes.warnings).toContain("title_matches_several_sheets");
+  });
+
+  it("stops at an earlier app whose empty read was incomplete: a later app does not answer instead (internal #273)", async () => {
+    const d = mk();
+    d.listWindows.mockReturnValue([
+      { windowId: 9, pid: 60157, layer: 0, onScreen: false, title: "保存" },
+      { windowId: 2, pid: 7, layer: 0, onScreen: false, title: "保存" },
+    ]);
+    d.axTree.mockImplementation(async ({ pid }: { pid: number }) =>
+      pid === 60157 ? tree({ pid, elements: [], readIncomplete: true }) : withSheet()
+    );
+    const { r, notes } = await run(d, { windowTitle: "保存" });
+    expect(r).toEqual([]);
+    expect(notes.warnings).toContain("ax_read_incomplete");
+    expect(d.axTree).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps an earlier app's incomplete read when no app has anything under the title (codex on #804)", async () => {
     const d = mk();
     d.listWindows.mockReturnValue([

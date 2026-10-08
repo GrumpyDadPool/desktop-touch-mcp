@@ -245,22 +245,21 @@ export async function readMacAxCandidates(
     // title; the last one's read is answered if none has (internal #257).
     // An earlier app whose read was incomplete is not known to hold nothing: if none has anything,
     // its warnings are answered and "nothing readable" is not (codex on #804).
-    const unsure: string[] = [];
     for (const [i, p] of pids.entries()) {
       const tried: MacAxReadNotes = { warnings: [] };
       const found = await readPidUnderTitle(deps, title, p, tried);
       // Several sheets carry the title in this app: it refused to pick one, and a later app must
       // not answer in its place (codex on #804).
       const ambiguous = tried.warnings.includes("title_matches_several_sheets");
-      if (found.length > 0 || ambiguous || i === pids.length - 1) {
-        let warnings = tried.warnings;
-        if (found.length === 0 && unsure.length > 0) {
-          warnings = [...new Set([...warnings.filter((w) => w !== "title_matches_nothing_readable"), ...unsure])];
-        }
-        Object.assign(notes, { ...tried, warnings: [...notes.warnings, ...warnings] });
+      // An empty read that did not see its app whole may have missed that app's own controls (a
+      // save sheet's 削除): a later app must not answer in its place either (internal #273).
+      const unsureEmpty = found.length === 0 && tried.warnings.some((w) => UNSURE_READ.test(w));
+      // The cost: when the open/save panel's service process is listed first and its read is
+      // incomplete, the panel is not reached by its title (measured complete, gate 2 on #805).
+      if (found.length > 0 || ambiguous || unsureEmpty || i === pids.length - 1) {
+        Object.assign(notes, { ...tried, warnings: [...notes.warnings, ...tried.warnings] });
         return found;
       }
-      unsure.push(...tried.warnings.filter((w) => UNSURE_READ.test(w)));
     }
     return [];
   } else if (pinnedPid !== undefined) {
@@ -276,8 +275,11 @@ export async function readMacAxCandidates(
   return readPidUnderTitle(deps, title, pid, notes);
 }
 
-/** Warnings that say a read did not see its app whole. */
-const UNSURE_READ = /^(ax_error:|ax_read_incomplete$|display_asleep$|ax_self_reference$|truncated:)/;
+/**
+ * Warnings that say a read did not see its app whole. The post-act qualifier counts these and the
+ * title's own (`INCOMPLETE_READ`, desktop-discover-act.ts) — one list, so the two cannot drift.
+ */
+export const UNSURE_READ = /^(ax_error:|ax_read_incomplete$|display_asleep$|ax_self_reference$|truncated:)/;
 
 /** Read one app's tree and the candidates under the title (all of them without one). */
 async function readPidUnderTitle(
@@ -324,6 +326,8 @@ async function readPidUnderTitle(
   // (internal #257). Only one: two documents' "保存" sheets read together would mix their
   // 削除 buttons, and one pressed for the wrong document loses its work (gate 2 on #804). Not when
   // an AX window carries the title: that window is what was named (its own sheet comes with it).
+  // A focused sheet under a listed window is not read again as the focused-window root (`roots`,
+  // src/macos/ax.rs), so each sheet here is one sheet: two that carry the title are two documents'.
   const sheetsTitled =
     !titled || windowsTitled
       ? []
@@ -340,9 +344,9 @@ async function readPidUnderTitle(
   // failed read: the window may simply not have been walked).
   const explained =
     tree.error !== undefined || tree.displayAsleep || tree.truncated || tree.selfReference || tree.readIncomplete === true;
-  if (titled && candidates.length === 0 && !explained) {
-    notes.warnings.push(sheetsTitled.length > 1 ? "title_matches_several_sheets" : "title_matches_nothing_readable");
-  }
+  // Several sheets is a refusal of its own, whatever else the read says.
+  if (titled && sheetsTitled.length > 1) notes.warnings.push("title_matches_several_sheets");
+  else if (titled && candidates.length === 0 && !explained) notes.warnings.push("title_matches_nothing_readable");
   for (const c of candidates) {
     if (c.role === "textbox" && c.value !== undefined && c.digest !== undefined) {
       (notes.values ??= {})[`ent_${c.digest}`] = c.value;
