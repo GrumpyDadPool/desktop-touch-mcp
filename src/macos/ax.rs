@@ -76,7 +76,21 @@ pub(crate) fn attr_element(e: &AXUIElement, name: &'static str, timeout_secs: f3
 }
 
 pub(crate) fn children(e: &AXUIElement, timeout_secs: f32) -> Vec<CFRetained<AXUIElement>> {
-    let Ok(v) = attr(e, "AXChildren") else { return Vec::new() };
+    children_read(e, timeout_secs).unwrap_or_default()
+}
+
+/// `AXChildren`, or `None` when it could not be read (`attr_opt`'s errors). An element that gives
+/// no children is a leaf, not a failure. A caller that must
+/// know it saw everything (`relocate`, a read's uniqueness, internal #260) tells the two apart.
+pub(crate) fn children_read(e: &AXUIElement, timeout_secs: f32) -> Option<Vec<CFRetained<AXUIElement>>> {
+    match attr_opt(e, "AXChildren") {
+        Ok(Some(v)) => Some(children_of(v, timeout_secs)),
+        Ok(None) => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
+fn children_of(v: CFRetained<CFType>, timeout_secs: f32) -> Vec<CFRetained<AXUIElement>> {
     let Ok(arr) = v.downcast::<CFArray>() else { return Vec::new() };
     let arr: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(arr) };
     arr.iter()
@@ -133,6 +147,46 @@ pub(crate) fn is_settable(e: &AXUIElement, name: &'static str) -> bool {
     let mut settable: u8 = 0;
     let err = unsafe { e.is_attribute_settable(&cfstr(name), NonNull::from(&mut settable)) };
     err == AXError::Success && settable != 0
+}
+
+/// `attr`, telling a read that could not be made from an attribute the element does not give
+/// (no value, unsupported): any other error is `Err`, and an identity built from it is not one —
+/// the next read may differ (codex on #802). One measured exception: Calculator answers `failure`
+/// for `AXSubrole` on the same two buttons in every read (5 of 5, 2026-10-08), a steady answer that
+/// reads as absent; counted as a failed read it marked every Calculator read incomplete.
+fn attr_opt(e: &AXUIElement, name: &'static str) -> Result<Option<CFRetained<CFType>>, AXError> {
+    match attr(e, name) {
+        Ok(v) => Ok(Some(v)),
+        Err(AXError::NoValue | AXError::AttributeUnsupported) => Ok(None),
+        Err(AXError::Failure) if name == "AXSubrole" => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// `attr_string`, failing when the read failed rather than when the attribute is absent.
+fn attr_string_strict(e: &AXUIElement, name: &'static str) -> Result<Option<String>, AXError> {
+    Ok(attr_opt(e, name)?.and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string())))
+}
+
+/// `frame`, failing when a read failed rather than when position or size is absent.
+fn frame_strict(e: &AXUIElement) -> Result<Option<MacRect>, AXError> {
+    frame_strict_with(e, &|| {})
+}
+
+/// `frame_strict`, calling `before` ahead of each of its two messages (`relocate` sets the time
+/// left there, codex on #802).
+fn frame_strict_with(e: &AXUIElement, before: &dyn Fn()) -> Result<Option<MacRect>, AXError> {
+    before();
+    let p = attr_opt(e, "AXPosition")?.and_then(|v| v.downcast::<AXValue>().ok()).and_then(|v| {
+        let mut p = CGPoint { x: 0.0, y: 0.0 };
+        unsafe { v.value(AXValueType::CGPoint, NonNull::from(&mut p).cast()) }.then_some(p)
+    });
+    before();
+    let z = attr_opt(e, "AXSize")?.and_then(|v| v.downcast::<AXValue>().ok()).and_then(|v| {
+        let mut s = CGSize { width: 0.0, height: 0.0 };
+        unsafe { v.value(AXValueType::CGSize, NonNull::from(&mut s).cast()) }.then_some(s)
+    });
+    Ok(p.zip(z).map(|(p, s)| MacRect { x: p.x, y: p.y, width: s.width, height: s.height }))
 }
 
 fn ax_point(e: &AXUIElement) -> Option<CGPoint> {
@@ -220,6 +274,33 @@ pub(crate) fn element_key_of(
     // filter empties differently.
     [subrole.unwrap_or(""), identifier.unwrap_or(""), title.unwrap_or(""), description.unwrap_or(""), &frame]
         .join("\u{1f}")
+}
+
+/// `element_key`, each of its reads held to the time left (`relocate`); `None` once it runs out or
+/// a read fails (an absent attribute is not a failure).
+fn element_key_within(
+    e: &AXUIElement,
+    timeout: f32,
+    left: &dyn Fn() -> f32,
+    late: &dyn Fn() -> bool,
+) -> Option<String> {
+    let read = |name: &'static str| {
+        unsafe { e.set_messaging_timeout(timeout.min(left())) };
+        let v = attr_string_strict(e, name).ok()?.filter(|s| !s.is_empty());
+        if late() { None } else { Some(v) }
+    };
+    let subrole = read("AXSubrole")?;
+    let identifier = read("AXIdentifier")?;
+    let title = read("AXTitle")?;
+    let description = read("AXDescription")?;
+    let f = frame_strict_with(e, &|| {
+        unsafe { e.set_messaging_timeout(timeout.min(left())) };
+    })
+    .ok()?;
+    if late() {
+        return None;
+    }
+    Some(element_key_of(subrole.as_deref(), identifier.as_deref(), title.as_deref(), description.as_deref(), f.as_ref()))
 }
 
 fn element_key(e: &AXUIElement) -> String {
@@ -372,6 +453,11 @@ pub struct MacAxTree {
     pub stopped_by: Option<String>,
     /// A child was equal to one of its ancestors and was not entered.
     pub self_reference: bool,
+    /// Some element's children, role or element-key attributes could not be
+    /// read (an AX error, not an absent attribute): the tree may miss an
+    /// element, or two alike may read as different, though the walk was not
+    /// cut short (internal #260, codex on #802).
+    pub read_incomplete: bool,
     /// The main display was asleep when the walk ended; AX then answers
     /// windows with the application element (see the module comment).
     pub display_asleep: bool,
@@ -404,6 +490,7 @@ pub(crate) fn read_tree(opts: &MacAxTreeOptions) -> MacAxTree {
                     truncated: false,
                     stopped_by: None,
                     self_reference: false,
+                    read_incomplete: false,
                     display_asleep: display_asleep(),
                     error: err,
                     elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
@@ -425,6 +512,7 @@ pub(crate) fn read_tree(opts: &MacAxTreeOptions) -> MacAxTree {
     type Entry = (String, CFRetained<AXUIElement>, Vec<CFRetained<AXUIElement>>, std::rc::Rc<String>);
     // The budget covers the roots too: no message waits past it.
     unsafe { app.set_messaging_timeout(timeout.min(left())) };
+    let mut read_incomplete = false;
     let (root_list, mut self_reference) =
         roots(&app, opts.include_menu_bar.unwrap_or(false), timeout.min(left()), &late);
     let mut stack: Vec<Entry> = Vec::new();
@@ -464,16 +552,31 @@ pub(crate) fn read_tree(opts: &MacAxTreeOptions) -> MacAxTree {
                 v
             }};
         }
-        let kids = read!(children(&e, timeout));
-        let role = read!(attr_string(&e, "AXRole").unwrap_or_default());
-        let subrole = read!(attr_string(&e, "AXSubrole"));
-        let title = read!(attr_string(&e, "AXTitle").filter(|s| !s.is_empty()));
-        let description = read!(attr_string(&e, "AXDescription").filter(|s| !s.is_empty()));
+        let kids = match read!(children_read(&e, timeout)) {
+            Some(kids) => kids,
+            None => {
+                read_incomplete = true;
+                Vec::new()
+            }
+        };
+        // What an element is (its role and element key) is read strictly: a failed read marks the
+        // tree incomplete instead of passing for an absent attribute.
+        let mut strict = |r: Result<Option<String>, AXError>| r.unwrap_or_else(|_| {
+            read_incomplete = true;
+            None
+        });
+        let role = strict(read!(attr_string_strict(&e, "AXRole"))).unwrap_or_default();
+        let subrole = strict(read!(attr_string_strict(&e, "AXSubrole")));
+        let title = strict(read!(attr_string_strict(&e, "AXTitle"))).filter(|s| !s.is_empty());
+        let description = strict(read!(attr_string_strict(&e, "AXDescription"))).filter(|s| !s.is_empty());
         let marked = read!(value_text_marked(&e));
         let value_truncated = marked.as_ref().is_some_and(|(_, cut)| *cut);
         let value = marked.map(|(s, _)| s);
-        let identifier = read!(attr_string(&e, "AXIdentifier").filter(|s| !s.is_empty()));
-        let frame = read!(frame(&e));
+        let identifier = strict(read!(attr_string_strict(&e, "AXIdentifier"))).filter(|s| !s.is_empty());
+        let frame = read!(frame_strict(&e)).unwrap_or_else(|_| {
+            read_incomplete = true;
+            None
+        });
         let enabled = read!(attr_bool(&e, "AXEnabled"));
         let focused = read!(attr_bool(&e, "AXFocused"));
         let actions = read!(action_names(&e));
@@ -525,6 +628,7 @@ pub(crate) fn read_tree(opts: &MacAxTreeOptions) -> MacAxTree {
         truncated: stopped_by.is_some(),
         stopped_by: stopped_by.map(str::to_string),
         self_reference,
+        read_incomplete,
         display_asleep: display_asleep(),
         error: None,
         elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
@@ -542,9 +646,15 @@ pub struct MacAxTarget {
     pub expected_role: String,
     /// The `rootKey` the caller read for this id.
     pub expected_root_key: String,
-    /// The `elementKey` the caller read for this id. The act is refused
-    /// (`element_changed`) when the root, the element or the role differs now.
+    /// The `elementKey` the caller read for this id. When the path now names
+    /// something else, the element is looked for under the same root by this
+    /// key and the role (`relocate`); the act is refused (`element_changed`)
+    /// when the root differs, or the element is not found there.
     pub expected_element_key: String,
+    /// Whether the element was the only one under its root with this role and
+    /// key when read (internal #260). Only then is it looked for again when
+    /// its path moved: of two alike, the one left is not the one leased.
+    pub relocatable: Option<bool>,
     pub timeout_secs: Option<f64>,
 }
 
@@ -570,21 +680,137 @@ fn refused(reason: &str) -> MacActResult {
 fn locate(t: &MacAxTarget) -> Result<CFRetained<AXUIElement>, MacActResult> {
     let timeout = t.timeout_secs.map(|s| s as f32).unwrap_or(DEFAULT_TIMEOUT_SECS);
     let app = app_element(t.pid, timeout);
-    let Some((root, e)) = resolve(&app, &t.id, timeout) else { return Err(refused("element_not_found")) };
+    let root_id = root_id_of(&t.id);
+    let (root, at_path) = match resolve(&app, &t.id, timeout) {
+        Some((root, e)) => (root, Some(e)),
+        // The path runs past the children there are now: the root may still hold the element.
+        None => match resolve(&app, &root_id, timeout) {
+            Some((root, _)) => (root, None),
+            None => return Err(refused("element_not_found")),
+        },
+    };
     if root_key(&root) != t.expected_root_key {
         return Err(refused("element_changed"));
     }
+    let is_it = |e: &AXUIElement| {
+        attr_string(e, "AXRole").as_deref() == Some(t.expected_role.as_str()) && element_key(e) == t.expected_element_key
+    };
+    let (e, id) = match at_path {
+        Some(e) if is_it(&e) => (e, t.id.clone()),
+        at_path => {
+            let found = if t.relocatable == Some(true) {
+                relocate(&app, &root, &root_id, &t.expected_role, &t.expected_element_key, timeout)
+            } else {
+                Relocated::NotTried
+            };
+            match found {
+                Relocated::One(id, e) => (e, id),
+                other => {
+                    let role = at_path.as_ref().and_then(|e| attr_string(e, "AXRole"));
+                    // Gone: the path names nothing and nothing under the root is it. Anything else —
+                    // the path names another element, two are alike now, the walk was cut short —
+                    // is a changed element, not a missing one (gate 2 on #802).
+                    let gone = at_path.is_none() && matches!(other, Relocated::NotFound);
+                    return Err(MacActResult { role, ..refused(if gone { "element_not_found" } else { "element_changed" }) });
+                }
+            }
+        }
+    };
     let role = attr_string(&e, "AXRole").unwrap_or_default();
-    if role != t.expected_role {
-        return Err(MacActResult { role: Some(role), ..refused("element_changed") });
-    }
-    if element_key(&e) != t.expected_element_key {
-        return Err(MacActResult { role: Some(role), ..refused("element_changed") });
-    }
-    if let Some(blocker) = modal_blocker(&app, &root, &t.id, timeout) {
+    if let Some(blocker) = modal_blocker(&app, &root, &id, timeout) {
         return Err(MacActResult { role: Some(role), blocker: Some(blocker), ..refused("modal_blocking") });
     }
     Ok(e)
+}
+
+/// The path of the root an element path starts from: `a.<i>`, `f` or `m`.
+fn root_id_of(id: &str) -> String {
+    let mut parts = id.split('.');
+    match parts.next() {
+        Some("a") => format!("a.{}", parts.next().unwrap_or("")),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+/// What `relocate` found.
+enum Relocated {
+    One(String, CFRetained<AXUIElement>),
+    NotFound,
+    /// Two or more alike, or the walk was cut short: no one element to name.
+    Unclear,
+    /// The element was not unique when read, so it is not looked for.
+    NotTried,
+}
+
+/// internal #260 — find the element a caller read by what it is (role and element key) under the
+/// root it was read in, when its path now names something else or nothing: a sibling before it
+/// came or went, so the path shifted while the element did not (Calculator: All Clear removes the
+/// expression line, and every button's index drops by one; their keys do not change, measured
+/// 2026-10-08). Asked only for an element that was the only one of its kind under its root when
+/// read (`relocatable`), and answers only when exactly one matches now. The walk holds a 3 s and
+/// 3000-element budget, no message waits past it, and a walk cut short answers `Unclear` rather
+/// than a guess. Like the tree read, it never enters an element equal to an ancestor, the app
+/// included (a sleeping display answers a window with the app itself).
+fn relocate(
+    app: &CFRetained<AXUIElement>,
+    root: &CFRetained<AXUIElement>,
+    root_id: &str,
+    role: &str,
+    key: &str,
+    timeout: f32,
+) -> Relocated {
+    const MAX_ELEMENTS: usize = 3000;
+    let t0 = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(3000);
+    let left = || budget.saturating_sub(t0.elapsed()).as_secs_f32().max(0.05);
+    let mut found: Option<(String, CFRetained<AXUIElement>)> = None;
+    type Entry = (String, CFRetained<AXUIElement>, Vec<CFRetained<AXUIElement>>);
+    let mut stack: Vec<Entry> = vec![(root_id.to_string(), root.clone(), vec![app.clone()])];
+    let mut visited = 0usize;
+    while let Some((id, e, ancestors)) = stack.pop() {
+        visited += 1;
+        // Every message is held to the time left, and the budget is checked after each (codex on #802).
+        let late = || t0.elapsed() >= budget;
+        if visited > MAX_ELEMENTS || late() {
+            return Relocated::Unclear;
+        }
+        unsafe { e.set_messaging_timeout(timeout.min(left())) };
+        // The role first: one message, and most elements stop there.
+        // A read that failed may hide the element or a twin: no one element can be named (codex on #802).
+        let Ok(read_role) = attr_string_strict(&e, "AXRole") else { return Relocated::Unclear };
+        let is_role = read_role.as_deref() == Some(role);
+        if late() {
+            return Relocated::Unclear;
+        }
+        if is_role {
+            let Some(k) = element_key_within(&e, timeout, &left, &late) else { return Relocated::Unclear };
+            if k == key {
+                if found.is_some() {
+                    return Relocated::Unclear;
+                }
+                found = Some((id.clone(), e.clone()));
+            }
+        }
+        unsafe { e.set_messaging_timeout(timeout.min(left())) };
+        // A subtree that could not be read may hold another one alike (codex on #802).
+        let Some(kids) = children_read(&e, timeout.min(left())) else { return Relocated::Unclear };
+        if late() {
+            return Relocated::Unclear;
+        }
+        let mut lineage = ancestors;
+        lineage.push(e.clone());
+        for (i, k) in kids.into_iter().enumerate().rev() {
+            if lineage.iter().any(|a| same(a, &k)) {
+                continue;
+            }
+            stack.push((format!("{id}.{i}"), k, lineage.clone()));
+        }
+    }
+    match found {
+        Some((id, e)) => Relocated::One(id, e),
+        None => Relocated::NotFound,
+    }
 }
 
 /// What blocks an act on the element at `id` under `root`, if anything (measured 2026-10-04:
@@ -594,12 +820,10 @@ fn locate(t: &MacAxTarget) -> Result<CFRetained<AXUIElement>, MacActResult> {
 /// - another window of the app that says it is modal (`AXModal`), e.g. an app-modal alert
 ///   (`modal_window:<title>`).
 fn modal_blocker(app: &AXUIElement, root: &AXUIElement, id: &str, timeout: f32) -> Option<String> {
-    let mut parts = id.split('.');
-    let root_id = match parts.next() {
-        Some("a") => format!("a.{}", parts.next().unwrap_or("")),
-        Some(other) => other.to_string(),
-        None => return None,
-    };
+    let root_id = root_id_of(id);
+    if root_id.is_empty() {
+        return None;
+    }
     for (i, child) in children(root, timeout).iter().enumerate() {
         if attr_string(child, "AXRole").as_deref() != Some("AXSheet") {
             continue;
@@ -712,6 +936,15 @@ mod tests {
 
     fn rect(x: f64) -> MacRect {
         MacRect { x, y: 2.0, width: 3.0, height: 4.0 }
+    }
+
+    #[test]
+    fn root_id_of_names_the_root_a_path_starts_from() {
+        assert_eq!(root_id_of("a.0.0.0.1.0.14"), "a.0");
+        assert_eq!(root_id_of("a.3"), "a.3");
+        assert_eq!(root_id_of("f.2.1"), "f");
+        assert_eq!(root_id_of("m"), "m");
+        assert_eq!(root_id_of(""), "");
     }
 
     #[test]

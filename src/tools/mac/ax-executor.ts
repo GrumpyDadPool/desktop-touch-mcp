@@ -2,11 +2,12 @@
  * Mac port M2-2: desktop_act through macOS Accessibility.
  *
  * Acts on the element `locator.ax` names, through the native `macAx*` calls,
- * which refuse when the path now names another window or element. Nothing
+ * which refuse when its window changed or the element is not found by its
+ * keys (at its path, or — when it was unique — where it moved; internal #260). Nothing
  * here takes the foreground: AXPress and AXValue reach a background app.
  *
  * Refusals map onto the touch loop's existing reasons (guarded-touch.ts):
- * - the element is gone or the path names something else → `TargetGoneError`
+ * - the element is gone or no longer what was read → `TargetGoneError`
  *   (`entity_not_found`: nothing was done; discover again);
  * - a write the app accepted but whose value did not become the text →
  *   `ValueNotAppliedError` (`value_not_applied`);
@@ -59,7 +60,7 @@ function refuse(r: NativeMacActResult, what: string): never {
       `${what}: ${reason}`,
       undefined,
       reason === "element_changed"
-        ? "The element this act named is not where it was read: its window or the element at that place changed since desktop_discover. Nothing was done."
+        ? "The element this act named is not what it was read as: its window changed since desktop_discover, or nothing in it is that element now (or more than one is). Nothing was done."
         : "The element this act named is no longer there. Nothing was done."
     );
   }
@@ -90,6 +91,7 @@ export function createMacAxExecutor(deps: MacAxExecutorDeps): ExecutorFn {
       expectedRole: ax.role,
       expectedRootKey: ax.rootKey,
       expectedElementKey: ax.elementKey,
+      relocatable: ax.unique === true,
     };
 
     if (action === "type" || action === "setValue") {

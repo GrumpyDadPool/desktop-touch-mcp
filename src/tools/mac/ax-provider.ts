@@ -111,29 +111,58 @@ export function isCandidate(e: NativeMacAxElement): boolean {
   return verbs.includes("read") && labelOf(e) !== undefined;
 }
 
-/**
- * The candidate's identity (the resolver's key, the entityId and the lease's evidence digest):
- * the app, the path, and the root and element keys — not the label and rect the resolver falls
- * back to, which two distinct AX elements can share (same title, no frame), and would then be
- * merged into one entity carrying one element's verbs and the other's locator (codex gate 1, #780).
- * The value is left out, so typing into a field does not change its identity.
- */
-export function axDigest(
-  pid: number,
-  e: Pick<NativeMacAxElement, "id" | "rootKey" | "elementKey" | "role" | "subrole" | "value">
-): string {
+/** What an element is under its window: role, element key, and a text's shown value. */
+function kindOf(e: Pick<NativeMacAxElement, "rootKey" | "elementKey" | "role" | "subrole" | "value">): string {
   // A text is named by what it shows, so what it shows is part of what it is: when Calculator's
   // display changes, the post-act diff must see a different entity (codex, #780). Texts are only
   // read, never leased for an act, so a changing identity costs nothing there.
   const shown = roleOf(e) === "label" ? `|${e.value ?? ""}` : "";
-  return createHash("sha1").update(`ax|${pid}|${e.id}|${e.rootKey}|${e.elementKey}${shown}`).digest("hex").slice(0, 16);
+  return `${e.rootKey}|${e.role}|${e.elementKey}${shown}`;
+}
+
+/**
+ * The candidate's identity (the resolver's key, the entityId and the lease's evidence digest):
+ * the app and what the element is under its window — not the label and rect the resolver falls
+ * back to, which two distinct AX elements can share (same title, no frame), and would then be
+ * merged into one entity carrying one element's verbs and the other's locator (codex gate 1, #780).
+ * The value is left out, so typing into a field does not change its identity.
+ *
+ * Not the path, for an element that is the only one of its kind under its window (internal #260):
+ * a sibling coming or going before it shifts its path while it stays what it was (Calculator's All
+ * Clear drops every button's index by one), and the native act finds it again by its keys
+ * (`relocate`, src/macos/ax.rs). Elements alike in everything keep the path as before
+ * (`unique: false`): told apart by order instead, one would take the other's identity when an
+ * earlier one went (gate 2 on #802).
+ */
+export function axDigest(
+  pid: number,
+  e: Pick<NativeMacAxElement, "id" | "rootKey" | "elementKey" | "role" | "subrole" | "value">,
+  unique = true
+): string {
+  const where = unique ? "" : `|${e.id}`;
+  return createHash("sha1").update(`ax|${pid}|${kindOf(e)}${where}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * Whether each element (by its path in this read) is the only one of its kind under its window.
+ * A read cut short (`truncated`), or one where some element's children or identity could not be
+ * read (`readIncomplete`), cannot say: a twin may lie past the cut, under that element, or read as
+ * different through a failed attribute, and the act would then find it as the only one left and
+ * press it for the other's lease (codex on #802).
+ * None is.
+ */
+function uniquenessOf(elements: readonly NativeMacAxElement[], truncated: boolean): Map<string, boolean> {
+  const count = new Map<string, number>();
+  for (const e of elements) count.set(kindOf(e), (count.get(kindOf(e)) ?? 0) + 1);
+  return new Map(elements.map((e) => [e.id, !truncated && count.get(kindOf(e)) === 1]));
 }
 
 export function toCandidate(
   e: NativeMacAxElement,
   pid: number,
   targetId: string,
-  observedAtMs: number
+  observedAtMs: number,
+  unique = true
 ): UiEntityCandidate {
   const label = labelOf(e);
   const secure = e.subrole === SECURE;
@@ -151,8 +180,8 @@ export function toCandidate(
     confidence: 0.9,
     observedAtMs,
     status: "observed",
-    digest: axDigest(pid, e),
-    locator: { ax: { pid, id: e.id, role: e.role, rootKey: e.rootKey, elementKey: e.elementKey } },
+    digest: axDigest(pid, e, unique),
+    locator: { ax: { pid, id: e.id, role: e.role, rootKey: e.rootKey, elementKey: e.elementKey, unique } },
   };
 }
 
@@ -224,10 +253,11 @@ export async function readMacAxCandidates(
   const needle = title?.toLowerCase();
   const observedAtMs = deps.now();
   const targetId = title ?? tree.appTitle ?? String(pid);
+  const unique = uniquenessOf(tree.elements, tree.truncated || tree.readIncomplete === true);
   const candidates = tree.elements
     .filter((e) => needle === undefined || needle === "" || rootTitle(e.rootKey).toLowerCase().includes(needle))
     .filter(isCandidate)
-    .map((e) => toCandidate(e, pid, targetId, observedAtMs));
+    .map((e) => toCandidate(e, pid, targetId, observedAtMs, unique.get(e.id) === true));
   for (const c of candidates) {
     if (c.role === "textbox" && c.value !== undefined && c.digest !== undefined) {
       (notes.values ??= {})[`ent_${c.digest}`] = c.value;
@@ -235,7 +265,7 @@ export async function readMacAxCandidates(
   }
   for (const e of tree.elements) {
     if (e.valueTruncated && roleOf(e) === "textbox" && e.subrole !== SECURE) {
-      (notes.truncated ??= []).push(`ent_${axDigest(pid, e)}`);
+      (notes.truncated ??= []).push(`ent_${axDigest(pid, e, unique.get(e.id) === true)}`);
     }
   }
   return candidates;

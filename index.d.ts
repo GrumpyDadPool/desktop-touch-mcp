@@ -956,6 +956,8 @@ export interface NativeMacAxTree {
   stoppedBy?: string
   /** A child equal to one of its ancestors was skipped. */
   selfReference: boolean
+  /** Some element's children, role or element-key attributes could not be read (an AX error, not an absent attribute): the tree may miss an element, or two alike may read as different. */
+  readIncomplete: boolean
   /** The main display was asleep: AX then answers windows with the app element. */
   displayAsleep: boolean
   /** AX could not be read at all (`api_disabled`, `cannot_complete`, ...). */
@@ -970,8 +972,10 @@ export interface NativeMacAxTarget {
   expectedRole: string
   /** The `rootKey` read for `id`. */
   expectedRootKey: string
-  /** The `elementKey` read for `id`; the act is refused (`element_changed`) when it, the root key or the role differs now. */
+  /** The `elementKey` read for `id`. When the path now names something else, the element is looked for under the same root by this key and the role. */
   expectedElementKey: string
+  /** The element was the only one of its kind under its root when read: only then is it looked for where it moved (internal #260). */
+  relocatable?: boolean
   timeoutSecs?: number
 }
 
