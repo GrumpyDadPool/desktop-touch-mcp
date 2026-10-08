@@ -47,9 +47,19 @@ const mockRunSomPipeline = vi.fn();
 // internal #211 (D) — the non-visual verdict reads a DXGI handle acquired before the action.
 const order: string[] = [];
 const fakeSub = { outputIndex: 0, isDisposed: false, next: vi.fn(async () => []), dispose: vi.fn(() => { order.push("dispose"); }) };
+// internal #235 — the handle that holds the duplication open while it reads its initial image; the
+// act reads `fakeSub`, taken after it.
+const primingSub = { outputIndex: 0, isDisposed: false, next: vi.fn(async () => []), dispose: vi.fn(() => { order.push("dispose priming"); }) };
+let nextIsPriming = true;
 const fakeBroker = {
-  acquire: vi.fn(() => { order.push("acquire"); return { sub: fakeSub, state: "hit-subscription" as const }; }),
+  acquire: vi.fn(() => {
+    order.push("acquire");
+    const sub = nextIsPriming ? primingSub : fakeSub;
+    nextIsPriming = !nextIsPriming;
+    return { sub, state: "hit-subscription" as const };
+  }),
   subscribe: vi.fn(() => ({ unsubscribe: () => undefined, state: "hit-subscription" as const })),
+  firstBatchRead: vi.fn(async (): Promise<void> => { order.push("firstBatchRead"); }),
 };
 const mockObserveAfterAct = vi.fn();
 
@@ -350,7 +360,9 @@ describe("desktop_act frame-diff dispatch — legacy S5 path (S5b fold off)", ()
     expect(mockVerifyLocalRepaint).not.toHaveBeenCalled();
     // internal #211 (D): the DXGI handle is taken BEFORE the action and read after it, then given
     // back; the old after-the-fact poll does not run.
-    expect(order).toEqual(["acquire", "touch", "observe", "dispose"]);
+    // internal #235, arm 10: and the act waits until a cold duplication has read its initial image.
+    // The act reads a handle taken after the wait, and the one that waited is given back first.
+    expect(order).toEqual(["acquire", "firstBatchRead", "acquire", "dispose priming", "touch", "observe", "dispose"]);
     // …and the window is watched again for an act that follows without a discover, with the act's
     // own trailing repaint given its grace (gate 2).
     expect(fakeBroker.subscribe).toHaveBeenCalledTimes(1);
@@ -369,6 +381,66 @@ describe("desktop_act frame-diff dispatch — legacy S5 path (S5b fold off)", ()
     // Gate hard-guards on visualOnly → no roiCapture for structured targets.
     expect(parsed["roiCapture"]).toBeUndefined();
   });
+
+  it("acts only after the duplication has read its initial image (internal #235, arm 10)", async () => {
+    const facade = spyFacadeVisualOnly({ visualOnly: false });
+    mockGetWindowRect.mockReturnValue(WINDOW_RECT);
+    order.length = 0;
+    let markRead: () => void = () => undefined;
+    fakeBroker.firstBatchRead.mockImplementationOnce(() => new Promise<void>((resolve) => { markRead = resolve; }));
+    vi.mocked(facade.touch).mockImplementation(async () => {
+      order.push("touch");
+      return { ok: true, executor: "mouse", diff: [], next: "none" } as Awaited<ReturnType<typeof facade.touch>>;
+    });
+    mockObserveAfterAct.mockResolvedValue({
+      observation: { motion: "any_change", source: "dxgi_dirty_rect", framesSampled: 1, totalElapsedMs: 50, watchedMs: 50 },
+      dirtyRects: [],
+    });
+    const pending = desktopActRawHandler({ lease: FAKE_LEASE, action: "click" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(order).toEqual(["acquire"]);
+    markRead();
+    await pending;
+    expect(order).toEqual(["acquire", "acquire", "dispose priming", "touch", "observe", "dispose"]);
+  });
+
+  it("acts anyway when the initial image never comes, after a bounded wait", async () => {
+    const facade = spyFacadeVisualOnly({ visualOnly: false });
+    mockGetWindowRect.mockReturnValue(WINDOW_RECT);
+    order.length = 0;
+    fakeBroker.firstBatchRead.mockImplementationOnce(() => new Promise<void>(() => undefined));
+    vi.mocked(facade.touch).mockImplementation(async () => {
+      order.push("touch");
+      return { ok: true, executor: "mouse", diff: [], next: "none" } as Awaited<ReturnType<typeof facade.touch>>;
+    });
+    mockObserveAfterAct.mockResolvedValue({
+      observation: { motion: "any_change", source: "dxgi_dirty_rect", framesSampled: 1, totalElapsedMs: 50, watchedMs: 50 },
+      dirtyRects: [],
+    });
+    const t0 = performance.now();
+    const result = await desktopActRawHandler({ lease: FAKE_LEASE, action: "click" });
+    const waited = performance.now() - t0;
+    expect(order).toEqual(["acquire", "acquire", "dispose priming", "touch", "observe", "dispose"]);
+    expect(waited).toBeGreaterThanOrEqual(450);
+    expect(waited).toBeLessThan(2000);
+    // A change it did see is still a change.
+    expect((parse(result.content)["observation"] as Record<string, unknown>)["motion"]).toBe("any_change");
+  });
+
+  for (const [primed, expected] of [[false, "indeterminate"], [true, "no_change"]] as const) {
+    it(`reads nothing ${primed ? "after the image was read" : "after the wait ran out"} → ${expected} (gate 2)`, async () => {
+      const facade = spyFacadeVisualOnly({ visualOnly: false });
+      mockGetWindowRect.mockReturnValue(WINDOW_RECT);
+      if (!primed) fakeBroker.firstBatchRead.mockImplementationOnce(() => new Promise<void>(() => undefined));
+      vi.mocked(facade.touch).mockResolvedValue({ ok: true, executor: "mouse", diff: [], next: "none" } as Awaited<ReturnType<typeof facade.touch>>);
+      mockObserveAfterAct.mockResolvedValue({
+        observation: { motion: "no_change", source: "dxgi_dirty_rect", framesSampled: 1, totalElapsedMs: 150, watchedMs: 150 },
+        dirtyRects: [],
+      });
+      const result = await desktopActRawHandler({ lease: FAKE_LEASE, action: "click" });
+      expect((parse(result.content)["observation"] as Record<string, unknown>)["motion"]).toBe(expected);
+    });
+  }
 
   it("gives the DXGI handle back when the action throws (gate 2)", async () => {
     const facade = spyFacadeVisualOnly({ visualOnly: false });

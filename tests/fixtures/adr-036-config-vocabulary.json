@@ -81,6 +81,9 @@
     "DESKTOP_TOUCH_DRAIN_OVERSIZE_THRESHOLD": [
       "src:ts"
     ],
+    "DESKTOP_TOUCH_ENABLE_DIRTY_RECTS": [
+      "src:ts"
+    ],
     "DESKTOP_TOUCH_ENABLE_ONNX_BACKEND": [
       "src:ts"
     ],
@@ -288,7 +291,7 @@
     "DESKTOP_TOUCH_DIAGNOSTIC_LOG_DISABLE": "unclassified",
     "DESKTOP_TOUCH_DIAGNOSTIC_LOG_MAX_BYTES": "unclassified",
     "DESKTOP_TOUCH_DIAGNOSTIC_LOG_PATH": "unclassified",
-    "DESKTOP_TOUCH_DISABLE_DIRTY_RECTS": "unclassified",
+    "DESKTOP_TOUCH_DISABLE_DIRTY_RECTS": "axis",
     "DESKTOP_TOUCH_DISABLE_FUKUWARAI_V2": "premise",
     "DESKTOP_TOUCH_DISABLE_KEY_LOCKER": "unclassified",
     "DESKTOP_TOUCH_DISABLE_NATIVE_UIA": "axis",
@@ -359,7 +362,8 @@
     "length": "unclassified",
     "toLowerCase": "unclassified",
     "trim": "unclassified",
-    "some": "unclassified"
+    "some": "unclassified",
+    "DESKTOP_TOUCH_ENABLE_DIRTY_RECTS": "axis"
   },
   "allowDynamic": [
     "src/utils/launch.ts:name"
@@ -371,7 +375,7 @@
       "found_by": "win2, 2026-09-17, internal dev/config-axis 309c327"
     }
   ],
-  "maxUnclassified": 58,
+  "maxUnclassified": 57,
   "documented": [
     "DESKTOP_TOUCH_ALLOWLIST",
     "DESKTOP_TOUCH_AUTO_GUARD",

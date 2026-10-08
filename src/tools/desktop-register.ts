@@ -96,10 +96,10 @@ import { probeAim } from "../engine/aim-probe.js";
 import { computeViewportPosition } from "../utils/viewport-position.js";
 import { pickPlainTopLevelWindowByTitle } from "./_resolve-window.js";
 import { resolveOutputIndexForHwnd } from "../engine/any-change.js";
-import { observeAfterAct, PreActWatch, visibleParts, type QuietRecord } from "../engine/act-motion.js";
+import { ACT_MOTION, observeAfterAct, PreActWatch, visibleParts, type QuietRecord } from "../engine/act-motion.js";
 import { captureFrame, type RawFrame } from "../engine/layer-buffer.js";
 import { verifyLocalRepaint } from "../engine/local-repaint.js";
-import { disposeSharedDirtyRectBroker, getSharedDirtyRectBroker, type BrokerSubscription, type CacheAcquireState } from "../engine/dxgi-broker.js";
+import { disposeSharedDirtyRectBroker, getSharedDirtyRectBroker, type BrokerSubscription, type CacheAcquireState, type DirtyRectBroker } from "../engine/dxgi-broker.js";
 import type { VisualMotionObservation } from "./_input-pipeline.js";
 import { shouldReturnRoiCapture, type ReturnCaptureMode } from "./_roi-capture-gate.js";
 import { filterDirtyRectsToWindow, boundingBox, clampRectToWindow, resolveFoldOcrRoi } from "./_roi-region.js";
@@ -668,6 +668,17 @@ let _onnxBackend: OnnxBackend | undefined;
 let _dirtyRouter: DirtyRectRouter | undefined;
 
 /**
+ * Whether the dirty-rect router starts with the facade. Off unless the operator sets
+ * `DESKTOP_TOUCH_ENABLE_DIRTY_RECTS=1` (internal #235): once started, it captures and OCRs
+ * whichever window is in front every few seconds with no tool call, the user's own windows
+ * included. `DESKTOP_TOUCH_DISABLE_DIRTY_RECTS=1` still wins over the opt-in.
+ */
+export function shouldStartDirtyRectRouter(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env["DESKTOP_TOUCH_ENABLE_DIRTY_RECTS"] === "1"
+    && env["DESKTOP_TOUCH_DISABLE_DIRTY_RECTS"] !== "1";
+}
+
+/**
  * @internal Test-only entry point: production feeds the backend via pushDirtySignal.
  * Call backend.updateSnapshot(targetKey, candidates) to deliver stable candidates.
  */
@@ -786,10 +797,12 @@ export function getDesktopFacade(): DesktopFacade {
         console.error("[desktop-register] Failed to initialize visual runtime:", err);
       });
 
-      // Phase 3: start dirty-rect router. Routes Desktop Duplication events
-      // to the foreground window's OcrVisualAdapter for immediate re-polling.
+      // Phase 3: start dirty-rect router, opt-in only (see shouldStartDirtyRectRouter).
+      // Routes Desktop Duplication events to the foreground window's OcrVisualAdapter
+      // for immediate re-polling. A discover's own OCR lane already feeds the same
+      // adapter for the window it reads, so the visual lane works without it.
       // Falls back to no-op if native addon is absent (no RDP error, just silence).
-      if (process.env["DESKTOP_TOUCH_DISABLE_DIRTY_RECTS"] !== "1") {
+      if (shouldStartDirtyRectRouter()) {
         _dirtyRouter = new DirtyRectRouter({
           onRois: (_rois, _nowMs) => {
             // Phase 3: trigger the foreground window's OCR adapter on dirty-rect events.
@@ -1050,8 +1063,8 @@ const desktopActRawHandlerInner = async (
   // frame-diff rather than DXGI dirty rects. A PrintWindow pre/post diff captures
   // only the target window's own pixels (occlusion-immune) and never touches the
   // DXGI dirty-rect broker, so it sidesteps both dogfood defects: F1 (occlusion-
-  // blind geometry filter) and F2 (the same-process DirtyRectRouter draining the
-  // frame before the act polls). See adr-024-seed2-dogfood-findings. The pre-
+  // blind geometry filter) and F2 (the same-process DirtyRectRouter, opt-in since
+  // #235, draining the frame before the act polls). See adr-024-seed2-dogfood-findings. The pre-
   // action frame MUST be captured BEFORE the touch, so resolve the visual-only
   // flag + window geometry up front. Non-visual-only targets keep the DXGI path;
   // since internal #211 D it reads a handle acquired before the touch
@@ -1558,6 +1571,12 @@ interface ActMotion {
   quiet: QuietRecord | undefined;
   sub: BrokerSubscription | null;
   cacheState: CacheAcquireState | undefined;
+  /**
+   * internal #235 — false when the wait for the duplication's initial image ran out: the act's
+   * repaint can then be folded into that image and dropped with it, so a read of nothing is not
+   * "no change".
+   */
+  primed: boolean;
   dispose(): void;
 }
 
@@ -1580,13 +1599,39 @@ async function prepareActMotion(facade: DesktopFacade, viewId: string): Promise<
     const broker = getSharedDirtyRectBroker();
     const where = rect !== null && rect.width > 0 && rect.height > 0 ? resolveOutputIndexForHwnd(hwnd, rect) : null;
     if (broker === null || where === null || !where.ok) {
-      return { hwnd, quiet, sub: null, cacheState: undefined, dispose: () => undefined };
+      return { hwnd, quiet, sub: null, cacheState: undefined, primed: true, dispose: () => undefined };
     }
+    // The first handle holds the duplication open while it reads its initial image; the act reads a
+    // second one taken after that, so what repainted during the wait (a tooltip, the last act's
+    // tail, the initial image itself when it is not dropped) is not counted as the act's (gate 2).
+    const priming = broker.acquire(where.outputIndex);
+    if (priming.sub === null) {
+      return { hwnd, quiet, sub: null, cacheState: priming.state, primed: true, dispose: () => undefined };
+    }
+    const primed = await firstBatchReadOrTimeout(broker, where.outputIndex);
     const acquired = broker.acquire(where.outputIndex);
+    priming.sub.dispose();
     const sub = acquired.sub;
-    return { hwnd, quiet, sub, cacheState: acquired.state, dispose: () => sub?.dispose() };
+    return { hwnd, quiet, sub, cacheState: priming.state, primed, dispose: () => sub?.dispose() };
   } catch {
     return null;
+  }
+}
+
+/**
+ * internal #235, arm 10 — wait until the duplication has read its initial image, so the act's repaint
+ * lands in a batch of its own instead of being dropped with that image. Bounded: an image that never
+ * comes costs `ACT_MOTION.firstBatchWaitMs`, not the act. False when it ran out.
+ */
+async function firstBatchReadOrTimeout(broker: DirtyRectBroker, outputIndex: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), ACT_MOTION.firstBatchWaitMs);
+  });
+  try {
+    return await Promise.race([broker.firstBatchRead(outputIndex).then(() => true), timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1670,10 +1715,13 @@ async function finishActMotion(m: ActMotion): Promise<{ observation: VisualMotio
     }
     // internal #245 — read only what was on screen (`visibleRegionOf`).
     const { frame, visible } = visibleRegionOf(m.hwnd, rect);
-    return await observeAfterAct(m.sub, frame, m.quiet, {
+    const read = await observeAfterAct(m.sub, frame, m.quiet, {
       ...(m.cacheState !== undefined && { cacheState: m.cacheState }),
       visible,
     });
+    return !m.primed && read.observation.motion === "no_change"
+      ? { ...read, observation: { ...read.observation, motion: "indeterminate" } }
+      : read;
   } catch {
     return null;
   }

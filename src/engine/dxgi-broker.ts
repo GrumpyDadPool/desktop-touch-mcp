@@ -29,7 +29,7 @@
  * 単独 test ~15-20 case で動作実証、consumer migration は PR-SR4-2 / -3 で。
  */
 
-import type { NativeDirtyRect } from "./native-types.js";
+import type { NativeDirtyRect, NativeDirtyRectSubscription, NativeOutputBounds } from "./native-types.js";
 import { nativeDuplication } from "./native-engine.js";
 
 // ─── Constants (sub-plan §5.3、broker 側私的複製、PR-SR4-2 で SSOT shift) ───
@@ -92,6 +92,8 @@ export interface SubscriptionLike {
   readonly isDisposed: boolean;
   next(timeoutMs: number): Promise<NativeDirtyRect[]>;
   dispose(): void;
+  /** Resolves once the first non-empty batch has been read (`dropInitialDesktopImage`). */
+  readonly firstBatchRead?: Promise<void>;
 }
 
 /**
@@ -457,6 +459,19 @@ export class DirtyRectBroker {
   }
 
   /**
+   * Resolves once the native subscription for `outputIndex` has read its first non-empty batch —
+   * the initial image a new duplication hands back (`dropInitialDesktopImage`). Already resolved
+   * when there is no live subscription or it does not say. A change made before this resolves can
+   * be folded into that image and dropped with it (internal #235, arm 10).
+   */
+  firstBatchRead(outputIndex: number): Promise<void> {
+    const entry = this.entries.get(outputIndex);
+    return entry?.kind === "subscription" && entry.sub.firstBatchRead !== undefined
+      ? entry.sub.firstBatchRead
+      : Promise.resolve();
+  }
+
+  /**
    * Mark `outputIndex` for short-lived back-off after a `sub.next()` failure
    * (E_DUP_ACCESS_LOST recovery). Disposes the native subscription so the
    * next `acquire` / `subscribe` call fast-paths to `hit-negative-backoff`
@@ -776,7 +791,58 @@ function defaultFactory(outputIndex: number): SubscriptionLike {
   if (typeof Ctor !== "function") {
     throw new Error("DirtyRectSubscription not available in native addon");
   }
-  return new Ctor(outputIndex) as unknown as SubscriptionLike;
+  const native = new Ctor(outputIndex) as unknown as NativeDirtyRectSubscription;
+  return dropInitialDesktopImage(native, native.outputBounds);
+}
+
+/**
+ * The first frame a new duplication hands back is the desktop's initial image, not a change: win2
+ * measured one rect covering the whole output (1920×1080 at the origin) as the first batch after
+ * every `miss-init`, 6 of 6, in a fresh process and after a 20 s idle rebuild (internal #235, arm 9).
+ * While the dirty-rect router ran it kept the broker warm, so no consumer saw it; now the next
+ * consumer after an idle does, and a discover-time `PreActWatch` would count it as a repaint.
+ *
+ * Only that shape is dropped: the first non-empty batch, when it is a single rect equal to the
+ * output's bounds. Rects are in desktop coordinates, so a secondary output's image does not start at
+ * the origin, and a small real change in the primary's top-left corner does. Anything else is passed
+ * on, so a real first change of another shape is not lost.
+ *
+ * A change made before that batch is read is folded into it and dropped with it: win2 measured a
+ * window repainted 42–99 ms after a cold acquire arriving nowhere, 9 of 9, while the same repaint
+ * without this wrapper sat inside the whole-output rect (arm 10). So `firstBatchRead` resolves once
+ * the batch is read, and an act waits for it before acting (`DirtyRectBroker.firstBatchRead`).
+ *
+ * @internal exported for tests.
+ */
+export function dropInitialDesktopImage(sub: SubscriptionLike, bounds: NativeOutputBounds): SubscriptionLike {
+  let firstSeen = false;
+  let markRead: () => void = () => undefined;
+  const firstBatchRead = new Promise<void>((resolve) => { markRead = resolve; });
+  return {
+    get isDisposed() { return sub.isDisposed; },
+    firstBatchRead,
+    async next(timeoutMs: number): Promise<NativeDirtyRect[]> {
+      const batch = await sub.next(timeoutMs);
+      if (firstSeen || batch.length === 0) return batch;
+      firstSeen = true;
+      markRead();
+      const only = batch.length === 1 ? batch[0] : undefined;
+      // Either orientation: a 90°/270° output's duplication surface is unrotated, so its rects come
+      // back with width and height swapped against `DesktopCoordinates` (gate 2, Copilot; not measured).
+      const whole =
+        only !== undefined &&
+        only.x === bounds.x &&
+        only.y === bounds.y &&
+        ((only.width === bounds.width && only.height === bounds.height) ||
+          (only.width === bounds.height && only.height === bounds.width));
+      // Read on at once: an empty batch would put the broker's fan-out to sleep for a poll interval
+      // just as the act it released starts (gate 2).
+      return whole ? sub.next(timeoutMs) : batch;
+    },
+    // Disposed (invalidated, access lost) before any batch: nothing more will be read, so a waiter
+    // is released rather than left to its timeout (gate 2).
+    dispose(): void { markRead(); sub.dispose(); },
+  };
 }
 
 /** Lazily construct (and reuse) the process-wide broker. Returns `null`
