@@ -224,17 +224,45 @@ export async function readMacAxCandidates(
   let pid: number | undefined;
   if (title !== undefined && title !== "") {
     const needle = title.toLowerCase();
-    const win = deps
-      .listWindows(false)
-      .find((w) => w.layer === 0 && (w.title ?? "").toLowerCase().includes(needle));
-    if (win === undefined) {
+    const pids = [
+      ...new Set(
+        deps
+          .listWindows(false)
+          .filter((w) => w.layer === 0 && (w.title ?? "").toLowerCase().includes(needle))
+          .map((w) => w.pid)
+      ),
+    ];
+    if (pids.length === 0) {
       // Window titles from CGWindowList need Screen Recording; without it every title is empty,
       // and "no window matches" would be a false answer (gate 2, #780).
       const titled = deps.listWindows(false).some((w) => w.layer === 0 && (w.title ?? "") !== "");
       notes.warnings.push(titled ? "no_window_matches_title" : "window_titles_unavailable");
       return [];
     }
-    pid = win.pid;
+    // Several apps can show a window with the title: the open/save panel's "保存" is listed for
+    // its service process as well as for the app whose tree holds its controls, and the service
+    // came first (measured 2026-10-08). Each is read in turn until one has something under the
+    // title; the last one's read is answered if none has (internal #257).
+    // An earlier app whose read was incomplete is not known to hold nothing: if none has anything,
+    // its warnings are answered and "nothing readable" is not (codex on #804).
+    const unsure: string[] = [];
+    for (const [i, p] of pids.entries()) {
+      const tried: MacAxReadNotes = { warnings: [] };
+      const found = await readPidUnderTitle(deps, title, p, tried);
+      // Several sheets carry the title in this app: it refused to pick one, and a later app must
+      // not answer in its place (codex on #804).
+      const ambiguous = tried.warnings.includes("title_matches_several_sheets");
+      if (found.length > 0 || ambiguous || i === pids.length - 1) {
+        let warnings = tried.warnings;
+        if (found.length === 0 && unsure.length > 0) {
+          warnings = [...new Set([...warnings.filter((w) => w !== "title_matches_nothing_readable"), ...unsure])];
+        }
+        Object.assign(notes, { ...tried, warnings: [...notes.warnings, ...warnings] });
+        return found;
+      }
+      unsure.push(...tried.warnings.filter((w) => UNSURE_READ.test(w)));
+    }
+    return [];
   } else if (pinnedPid !== undefined) {
     pid = pinnedPid;
   } else {
@@ -245,6 +273,19 @@ export async function readMacAxCandidates(
       return [];
     }
   }
+  return readPidUnderTitle(deps, title, pid, notes);
+}
+
+/** Warnings that say a read did not see its app whole. */
+const UNSURE_READ = /^(ax_error:|ax_read_incomplete$|display_asleep$|ax_self_reference$|truncated:)/;
+
+/** Read one app's tree and the candidates under the title (all of them without one). */
+async function readPidUnderTitle(
+  deps: MacAxProviderDeps,
+  title: string | undefined,
+  pid: number,
+  notes: MacAxReadNotes
+): Promise<UiEntityCandidate[]> {
   notes.pid = pid;
 
   const tree = await deps.axTree({ pid });
@@ -253,6 +294,9 @@ export async function readMacAxCandidates(
   if (tree.displayAsleep) notes.warnings.push("display_asleep");
   if (tree.selfReference) notes.warnings.push("ax_self_reference");
   if (tree.truncated) notes.warnings.push(`truncated:${tree.stoppedBy ?? "unknown"}`);
+  // Some element's children or identity could not be read: what is missing is not known to be
+  // absent (codex on #804).
+  if (tree.readIncomplete === true) notes.warnings.push("ax_read_incomplete");
   // A sheet blocks its window (acts behind it are refused natively). Its controls may live in
   // another process — the open/save panel's do, and then nothing of it is in this tree.
   // The same sheet can be reached from two roots (its window and the focused window): say it once.
@@ -268,14 +312,37 @@ export async function readMacAxCandidates(
     if (!notes.warnings.includes(w)) notes.warnings.push(w);
   }
 
-  const needle = title?.toLowerCase();
+  const needle = sheetNeedle;
   const observedAtMs = deps.now();
   const targetId = title ?? tree.appTitle ?? String(pid);
   const unique = uniquenessOf(tree.elements, tree.truncated || tree.readIncomplete === true);
+  const titled = needle !== undefined && needle !== "";
+  const windowsTitled = titled && tree.elements.some((e) => rootTitle(e.rootKey).toLowerCase().includes(needle));
+  // A sheet is not a window in the AX tree: its controls sit under its window's root, though the
+  // window list names it on its own ("保存"). So a title no AX window carries is matched against
+  // sheets, and a sheet's title reads what is in it — the route a refused act's advice gives
+  // (internal #257). Only one: two documents' "保存" sheets read together would mix their
+  // 削除 buttons, and one pressed for the wrong document loses its work (gate 2 on #804). Not when
+  // an AX window carries the title: that window is what was named (its own sheet comes with it).
+  const sheetsTitled =
+    !titled || windowsTitled
+      ? []
+      : tree.elements.filter((e) => e.role === "AXSheet" && (e.title ?? e.description ?? "").toLowerCase().includes(needle));
+  const sheet = sheetsTitled.length === 1 ? sheetsTitled[0] : undefined;
+  const underTitle = (e: NativeMacAxElement) =>
+    !titled || rootTitle(e.rootKey).toLowerCase().includes(needle) || (sheet !== undefined && e.id.startsWith(`${sheet.id}.`));
   const candidates = tree.elements
-    .filter((e) => needle === undefined || needle === "" || rootTitle(e.rootKey).toLowerCase().includes(needle))
+    .filter(underTitle)
     .filter(isCandidate)
     .map((e) => toCandidate(e, pid, targetId, observedAtMs, unique.get(e.id) === true));
+  // Say why a titled read came back empty rather than answer it as if the window held nothing
+  // (internal #257) — unless a warning above already says why (a sleeping display, a cut-off or
+  // failed read: the window may simply not have been walked).
+  const explained =
+    tree.error !== undefined || tree.displayAsleep || tree.truncated || tree.selfReference || tree.readIncomplete === true;
+  if (titled && candidates.length === 0 && !explained) {
+    notes.warnings.push(sheetsTitled.length > 1 ? "title_matches_several_sheets" : "title_matches_nothing_readable");
+  }
   for (const c of candidates) {
     if (c.role === "textbox" && c.value !== undefined && c.digest !== undefined) {
       (notes.values ??= {})[`ent_${c.digest}`] = c.value;
