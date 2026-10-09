@@ -1,0 +1,10 @@
+name: Sync Fork
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: wei/pull@v2
