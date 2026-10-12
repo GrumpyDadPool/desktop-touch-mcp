@@ -12,7 +12,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
 import { randomBytes } from "node:crypto";
-import { KeyLockerHost } from "../../src/engine/key-locker-host.js";
+import { KeyLockerHost, KEY_LOCKER_PROTOCOL_VERSION } from "../../src/engine/key-locker-host.js";
 
 function pipePath(): string {
   return `\\\\.\\pipe\\dtm-locker-test-${randomBytes(8).toString("hex")}`;
@@ -30,6 +30,7 @@ function makeFakeLocker(
     reportPid?: number;
     firstFrame?: string;
     protocol?: string;
+    consoleEchoes?: boolean;
     seed?: string[];
     captureReply?: { captured: boolean; rt: boolean };
     state?: FakeState;
@@ -37,7 +38,7 @@ function makeFakeLocker(
     promptReply?: string;
   } = {},
 ): net.Server {
-  const proto = opts.protocol ?? "1";
+  const proto = opts.protocol ?? KEY_LOCKER_PROTOCOL_VERSION;
   const reportPid = opts.reportPid ?? 4343;
   const state = opts.state ?? { store: new Set(opts.seed ?? []), captureReply: opts.captureReply ?? { captured: true, rt: true }, lastFrames: [] };
   return net.createServer((sock) => {
@@ -69,6 +70,13 @@ function makeFakeLocker(
             const reply = opts.promptReply ?? "autofill";
             if (reply === "__err__") write({ id: req.id, ok: false, r: "", e: "bad_prompt" });
             else write({ id: req.id, ok: true, r: reply }); // r = the choice; NO secret ever on the wire
+            break;
+          }
+          case "inject": {
+            // Mirrors Injection.cs's fill_once gate: `requireEchoOff` and an echoing console → echo_on.
+            const t = (req as unknown as { t?: { requireEchoOff?: boolean } }).t;
+            if (t?.requireEchoOff === true && opts.consoleEchoes === true) write({ id: req.id, ok: false, r: "", e: "echo_on" });
+            else write({ id: req.id, ok: true, r: "", verified: true });
             break;
           }
           case "shutdown": write({ id: req.id, ok: true, r: "bye" }); break;
@@ -106,9 +114,9 @@ describe("KeyLockerHost client protocol (fake peer)", () => {
     hosts.push(host);
 
     expect(host.helperPid).toBe(515_151);
-    expect(host.protocolVersion).toBe("1");
+    expect(host.protocolVersion).toBe("2");
     expect(await host.ping()).toBe(true);
-    expect(await host.version()).toBe("1");
+    expect(await host.version()).toBe("2");
   });
 
   it("exists() reflects the store; delete() removes", async () => {
@@ -141,6 +149,33 @@ describe("KeyLockerHost client protocol (fake peer)", () => {
     const parsed = JSON.parse(captureFrame!) as Record<string, unknown>;
     expect(Object.keys(parsed).sort()).toEqual(["id", "k", "m"]);
     expect(parsed.k).toBe("ssh:example.com");
+  });
+
+  it("capture() with a dialog sends only the secret-free label / note / purpose beside the key (#277)", async () => {
+    const path = pipePath();
+    const state: FakeState = { store: new Set(), captureReply: { captured: true, rt: true }, lastFrames: [] };
+    await listen(makeFakeLocker(path, { state }), path);
+    const host = await KeyLockerHost.connectForTest(path);
+    hosts.push(host);
+
+    await host.capture("opaque-1", { label: "locker console 1234", note: "log in to the build box", purpose: "fill_once" });
+    const parsed = JSON.parse(state.lastFrames.find((f) => f.includes('"capture"'))!) as Record<string, unknown>;
+    expect(Object.keys(parsed).sort()).toEqual(["id", "k", "label", "m", "note", "purpose"]);
+    expect(parsed).toMatchObject({ k: "opaque-1", label: "locker console 1234", note: "log in to the build box", purpose: "fill_once" });
+  });
+
+  it("inject() carries requireEchoOff on the wire, and echo_on comes back as itself, not executor_failed (#806)", async () => {
+    const path = pipePath();
+    const state: FakeState = { store: new Set(), captureReply: { captured: true, rt: true }, lastFrames: [] };
+    await listen(makeFakeLocker(path, { state, consoleEchoes: true }), path);
+    const host = await KeyLockerHost.connectForTest(path);
+    hosts.push(host);
+
+    const target = { shellPid: 4321, shellStartMs: 10, submit: true };
+    expect(await host.inject("op-1", target)).toEqual({ ok: true, verified: true }); // the loop's write: no gate
+    expect(await host.inject("op-1", { ...target, requireEchoOff: true })).toEqual({ ok: false, code: "echo_on" });
+    const frame = JSON.parse(state.lastFrames.filter((f) => f.includes('"inject"')).at(-1)!) as { t: Record<string, unknown> };
+    expect(frame.t.requireEchoOff).toBe(true);
   });
 
   it("capture() reports a cancelled dialog as {captured:false}", async () => {
@@ -202,7 +237,7 @@ describe("KeyLockerHost client protocol (fake peer)", () => {
 
     const [p, v, e] = await Promise.all([host.ping(), host.version(), host.exists("a")]);
     expect(p).toBe(true);
-    expect(v).toBe("1");
+    expect(v).toBe("2");
     expect(e).toBe(true);
   });
 
@@ -220,8 +255,15 @@ describe("KeyLockerHost client protocol (fake peer)", () => {
 
   it("rejects a locker whose protocol version does not match", async () => {
     const path = pipePath();
-    await listen(makeFakeLocker(path, { protocol: "2" }), path);
-    await expect(KeyLockerHost.connectForTest(path)).rejects.toThrow(/protocol '2' != expected '1'/);
+    await listen(makeFakeLocker(path, { protocol: "3" }), path);
+    await expect(KeyLockerHost.connectForTest(path)).rejects.toThrow(/protocol '3' != expected '2'/);
+  });
+
+  it("rejects a v1 locker — the helper from before capture carried label/note/purpose (PR #806)", async () => {
+    // A stale bin/key-locker.exe would show a fill_once dialog with an opaque id and a [Save] button.
+    const path = pipePath();
+    await listen(makeFakeLocker(path, { protocol: "1" }), path);
+    await expect(KeyLockerHost.connectForTest(path)).rejects.toThrow(/protocol '1' != expected '2'/);
   });
 
   it("fails pending requests after dispose", async () => {

@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.3.0] - 2026-10-12 — macOS preview, one-time password fill for the key locker, and quieter background reading
 
 ### Added — macOS (preview)
 - **desktop-touch now runs on Apple Silicon Macs (macOS 14 or later), as a limited preview — four tools only:**
@@ -11,6 +11,20 @@
 - An act is refused (`entity_not_found`) when the window or the element it named changed since
   `desktop_discover`, and (`modal_blocking`) when a sheet or an app-modal window is open over it —
   nothing is pressed or typed.
+
+### Added — Windows
+- **`key_locker({action:'fill_once', paneId, reason})` — type a password once into a prompt that
+  autofill does not handle.** For example, an `ssh` you run inside another `ssh` session (a jump
+  host), where autofill stays out because it cannot see the inner login. You type the password
+  into the locker's own dialog, which shows the assistant's reason. It is typed once into that
+  `launch_console` pane's current password prompt and then forgotten; nothing is saved. It types
+  only into a real password prompt (an `ssh` or `sudo` running in that pane, with the console not
+  showing what is typed), and only if the pane still shows the same prompt when you close the dialog. Past the first `ssh` hop, the prompt comes from
+  the remote machine, so check that the dialog's reason matches what you expect there.
+  The dialog, and the check that the console is not echoing, are new in this release; if a real
+  password prompt is refused with `echo_on`, nothing was typed — tell us.
+- The locker's secret-entry dialog now says what the entry is for (for example
+  `ssh://user@host:22`), instead of an internal id.
 
 ### Changed — Windows
 - **The server no longer reads the window in front on its own.** Since 1.0 it captured and OCRed
