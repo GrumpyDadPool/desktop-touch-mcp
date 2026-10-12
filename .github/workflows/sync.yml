@@ -6,5 +6,13 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: wei/pull@v1
+      - name: Merge upstream default branch into fork
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/merge-upstream" \
+            -f branch="${{ github.ref_name }}" \
+            --jq '{message, merge_type}'
