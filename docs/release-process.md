@@ -184,6 +184,11 @@ Record every narrowing here so the exceptions stay visible:
   decided to release on what had been measured and patch the next day if needed. What was measured:
   the fill_once real-machine cells F1–F11 on cddb1152. Not run: E1–E3, the echo-off read added
   just before release (ac897c30); a misread fails closed (`echo_on`, nothing typed).
+  The release run's `npm-publish` job went red although the publish succeeded: `npm publish`
+  printed `+ @harusame64/desktop-touch-mcp@2.3.0` at 14:24:25Z, but the registry first served
+  2.3.0 at about 14:28:50Z. **Verify npm publish** polls for 2 minutes (12 × 10 s), so it gave up
+  first. A red Verify step is therefore not proof that nothing was published: check
+  `npm view @harusame64/desktop-touch-mcp@X.Y.Z version` for several minutes before cutting a patch.
 
 ### HTTP Transport Verification (Required)
 
