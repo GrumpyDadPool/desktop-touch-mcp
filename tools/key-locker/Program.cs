@@ -36,7 +36,9 @@ using System.Windows.Controls;
 
 internal static class KeyLocker
 {
-    private const string ProtocolVersion = "1";
+    // "2" (PR #806): capture carries label/note/purpose. Bumped so a stale helper is refused at hello instead
+    // of showing a fill_once dialog with an opaque id and a [Save] button.
+    private const string ProtocolVersion = "2";
     private const int MaxClientRejects = 8;
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -223,7 +225,7 @@ internal static class KeyLocker
             {
                 case "ping": WriteReply(server, id, true, "pong", null); break;
                 case "version": WriteReply(server, id, true, ProtocolVersion, null); break;
-                case "capture": HandleCapture(server, id, key); break;
+                case "capture": HandleCapture(server, id, key, line); break;
                 case "exists": WriteReply(server, id, true, _store.Exists(key) ? "1" : "0", null); break;
                 case "delete": WriteReply(server, id, true, _store.Delete(key) ? "1" : "0", null); break;
                 case "inject": HandleInject(server, id, key, line); break;
@@ -238,17 +240,48 @@ internal static class KeyLocker
     /// Show the secure dialog on the UI thread, capture a secret, DPAPI-store it under the
     /// opaque key, and internally round-trip-verify it — WITHOUT the secret ever crossing the
     /// pipe. Reply reports captured + round-trip-ok booleans only.
-    private static void HandleCapture(NamedPipeServerStream server, long id, string key)
+    /// Optional SECRET-FREE frame fields tell the user what the entry is for (internal #277): `label` (the
+    /// target — a binding URI, or the locker console a fill_once writes into; falls back to the key),
+    /// `note` (the assistant's stated reason, shown as the assistant's words) and `purpose` ("fill_once" =
+    /// a one-time entry that is not saved). A malformed field is ignored, never fatal.
+    private static void HandleCapture(NamedPipeServerStream server, long id, string key, string line)
     {
         if (string.IsNullOrEmpty(key)) { WriteReply(server, id, false, "", "missing_key"); return; }
+        string label = key, note = "";
+        bool once = false;
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("label", out var l) && l.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(l.GetString())) label = l.GetString()!;
+            if (root.TryGetProperty("note", out var n) && n.ValueKind == JsonValueKind.String) note = PlainLine(n.GetString() ?? "");
+            once = root.TryGetProperty("purpose", out var p) && p.ValueKind == JsonValueKind.String && p.GetString() == "fill_once";
+        }
+        catch { /* the frame already parsed once in RunControlLoop; keep the key-only defaults */ }
         string? secret = null;
-        try { secret = _app!.Dispatcher.Invoke(() => SecureDialog.Prompt(key)); }
+        try { secret = _app!.Dispatcher.Invoke(() => SecureDialog.Prompt(label, note, once)); }
         catch (Exception e) { Console.Error.WriteLine($"[key-locker] dialog failed: {e.Message}"); }
 
         if (secret == null) { WriteFrameReplyCaptured(server, id, false, false); return; }
-        _store.Capture(key, secret);
+        if (once) _store.CaptureEphemeral(key, secret); // fill_once: memory only, never store.json
+        else _store.Capture(key, secret);
         var rt = _store.RoundTripOk(key, secret); // in-process verify; secret stays local
         WriteFrameReplyCaptured(server, id, true, rt);
+    }
+
+    /// One plain display line: control, format (bidi / zero-width) and line/paragraph separators become a
+    /// space, so the assistant's note cannot fake extra lines or reorder the dialog (the MCP side does the
+    /// same; this is the backstop).
+    private static string PlainLine(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var ch in s)
+        {
+            var cat = char.GetUnicodeCategory(ch);
+            sb.Append(cat is System.Globalization.UnicodeCategory.Control or System.Globalization.UnicodeCategory.Format
+                or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator ? ' ' : ch);
+        }
+        return sb.ToString().Trim();
     }
 
     /// W-3.5: the SECRET-FREE confirm/offer backstop dialog (ADR seed §4). Shows the binding LABEL only —
@@ -339,7 +372,8 @@ internal static class KeyLocker
         TitleFp: t.TryGetProperty("titleFp", out var fp) && fp.ValueKind == JsonValueKind.String ? fp.GetString() ?? "" : "",
         Submit: t.TryGetProperty("submit", out var sub) && sub.ValueKind == JsonValueKind.True,
         ShellPid: (uint)ParseLong(t, "shellPid"),
-        ShellStartMs: ParseLong(t, "shellStartMs"));
+        ShellStartMs: ParseLong(t, "shellStartMs"),
+        RequireEchoOff: t.TryGetProperty("requireEchoOff", out var reo) && reo.ValueKind == JsonValueKind.True);
 
     /// S-pid E3b/§4 regression pins, folded into `-SelfTestL2`'s exit status:
     ///   1. a `t` frame carrying `shellPid`/`shellStartMs` (number OR decimal-string form) reconstructs
@@ -486,6 +520,10 @@ internal sealed class LockerStore
 
     private readonly string _path;
     private readonly Dictionary<string, string> _entries = new(StringComparer.Ordinal); // id -> base64(DPAPI blob)
+    // fill_once secrets (PR #806): DPAPI-wrapped like the rest, but held in THIS process only and never written
+    // to store.json — so if the MCP server dies mid-dialog (e.g. the emergency stop exits it), the secret dies
+    // with this helper instead of persisting under an id nothing points to (win2 F6).
+    private readonly Dictionary<string, string> _ephemeral = new(StringComparer.Ordinal);
 
     public LockerStore(string dir)
     {
@@ -521,16 +559,35 @@ internal sealed class LockerStore
         Save();
     }
 
-    public bool Exists(string id) => _entries.ContainsKey(id);
+    /// A fill_once entry: in memory only (see `_ephemeral`).
+    public void CaptureEphemeral(string id, string secret)
+    {
+        var blob = ProtectedData.Protect(Encoding.UTF8.GetBytes(secret), Entropy, DataProtectionScope.CurrentUser);
+        _ephemeral[id] = Convert.ToBase64String(blob);
+    }
 
-    public bool Delete(string id) { var r = _entries.Remove(id); if (r) Save(); return r; }
+    private bool TryBlob(string id, out string b64)
+    {
+        if (_entries.TryGetValue(id, out var persisted)) { b64 = persisted; return true; }
+        if (_ephemeral.TryGetValue(id, out var once)) { b64 = once; return true; }
+        b64 = "";
+        return false;
+    }
+
+    public bool Exists(string id) => _entries.ContainsKey(id) || _ephemeral.ContainsKey(id);
+
+    public bool Delete(string id)
+    {
+        if (_ephemeral.Remove(id)) return true;
+        var r = _entries.Remove(id); if (r) Save(); return r;
+    }
 
     /// In-process round-trip: decrypt the stored blob and compare to `expected`. Any DPAPI
     /// integrity/decrypt failure returns false (never throws to the caller). The secret is
     /// NOT returned — only the boolean.
     public bool RoundTripOk(string id, string expected)
     {
-        if (!_entries.TryGetValue(id, out var b64)) return false;
+        if (!TryBlob(id, out var b64)) return false;
         try
         {
             var plain = ProtectedData.Unprotect(Convert.FromBase64String(b64), Entropy, DataProtectionScope.CurrentUser);
@@ -545,7 +602,7 @@ internal sealed class LockerStore
     /// console-buffer injector and the askpass serving path.
     public bool WithDecrypted(string id, Action<byte[]> use)
     {
-        if (!_entries.TryGetValue(id, out var b64)) return false;
+        if (!TryBlob(id, out var b64)) return false;
         byte[]? plain = null;
         try
         {
@@ -580,11 +637,14 @@ internal sealed class LockerStore
 /// (cancel). The secret is returned IN-PROCESS only; it never crosses the pipe.
 internal static class SecureDialog
 {
-    public static string? Prompt(string bindingLabel)
+    /// `label` names the target (locker-derived, never a pane's live title or prompt text). `note` is the
+    /// assistant's stated reason — shown, but marked as the assistant's words, since it may be wrong.
+    /// `once` = a fill_once entry: typed into one prompt, then deleted (the button says so).
+    public static string? Prompt(string label, string note = "", bool once = false)
     {
         string? result = null;
         var pwd = new PasswordBox { Margin = new Thickness(10, 4, 10, 12), FontSize = 18, Width = 360 };
-        var ok = new Button { Content = "Save", Width = 90, Margin = new Thickness(4), IsDefault = true };
+        var ok = new Button { Content = once ? "Fill once" : "Save", Width = 90, Margin = new Thickness(4), IsDefault = true };
         var cancel = new Button { Content = "Cancel", Width = 90, Margin = new Thickness(4), IsCancel = true };
 
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
@@ -592,8 +652,25 @@ internal static class SecureDialog
         buttons.Children.Add(cancel);
 
         var panel = new StackPanel { Margin = new Thickness(14) };
-        panel.Children.Add(new Label { Content = "desktop-touch key locker — secret entry", FontWeight = FontWeights.Bold });
-        panel.Children.Add(new TextBlock { Text = $"Enter the secret for:  {bindingLabel}", Margin = new Thickness(10, 6, 10, 4), TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(new Label { Content = once ? "desktop-touch key locker — one-time entry (not saved)" : "desktop-touch key locker — secret entry", FontWeight = FontWeights.Bold });
+        panel.Children.Add(new TextBlock
+        {
+            Text = once ? $"The assistant asks you to type a password into:  {label}" : $"Enter the secret for:  {label}",
+            Margin = new Thickness(10, 6, 10, 4),
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 420,
+        });
+        if (!string.IsNullOrWhiteSpace(note))
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"The assistant's reason (its words, it may be wrong):  {note}",
+                Margin = new Thickness(10, 2, 10, 4),
+                TextWrapping = TextWrapping.Wrap,
+                FontStyle = FontStyles.Italic,
+                MaxWidth = 420,
+            });
+        }
         panel.Children.Add(pwd);
         panel.Children.Add(buttons);
 

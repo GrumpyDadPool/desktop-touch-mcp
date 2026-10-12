@@ -65,6 +65,7 @@ import type { SessionContext } from "./command-derivation.js";
 import { awaitLanded, type ExitCompletion } from "./landed-detection.js";
 import type { PaneAnchor } from "./inject-target.js";
 import type { InjectResult } from "./injector.js";
+import type { FillOnceClaim } from "./fill-once.js";
 import {
   ENV_ASSIGN_RE,
   classifySshLogin,
@@ -133,7 +134,7 @@ export interface CaptureDriverDeps {
   /** OPTIONAL [Never] tombstone writer — unwired ⇒ "never" behaves like "not now". */
   onNever?(canonicalKey: string): void;
   /** Open the locker's secure dialog for `opaqueId` (secret stays in the locker). */
-  capture(opaqueId: string): Promise<{ captured: boolean }>;
+  capture(opaqueId: string, binding: BindingUri): Promise<{ captured: boolean }>;
   /** Delete the locker entry for `opaqueId` (the reverse-orphan closure). */
   deleteSecret(opaqueId: string): Promise<void>;
   /** Assemble the pane InjectTarget from the SPAWN-captured anchor (`assembleInjectTarget`) + console-buffer
@@ -471,6 +472,67 @@ export class KeyLockerCaptureDriver {
     return this.panes.has(paneId);
   }
 
+  /**
+   * `fill_once` (internal #277): take an ANCHORED pane for an assistant-requested one-shot fill, serialized
+   * against this driver's own poll + capture loop through the same `pollBusy` flag (a poll that finds it set
+   * returns `busy`). Any pending arm is DROPPED: the assistant has taken this prompt over, and a surviving arm
+   * would open a second dialog for the same prompt. `loopPhase` is `pre-landed` while the claim is held, so a
+   * command delivered meanwhile is DROPPED, as during the loop's own dialog (§0-CORR.3): the shell is blocked
+   * at the password prompt, which swallows it, and recording it would leave an arm for a command that never
+   * ran — the next prompt could then be filled under the wrong binding (PR #806 Opus round 2, P2). If the
+   * prompt had already timed out and the command did run, the cost is a missed autofill (the W-2b scan still
+   * sinks an unregistered ssh to UNKNOWN), never a wrong fill. Only an anchored pane qualifies — the anchor is the
+   * spawn-captured identity the locker re-verifies at injection (a user's own terminal never).
+   * The returned `token` is the claimed record; `releaseFillOnce` resets only that record, and only while it
+   * is still the pane's record — never a pane re-anchored under the same id, nor a later claim of it.
+   */
+  claimForFillOnce(paneId: string): FillOnceClaim {
+    const rec = this.panes.get(paneId);
+    if (rec === undefined) return { ok: false, reason: "not_anchored" };
+    if (rec.pollBusy || rec.loopPhase !== "none") return { ok: false, reason: "busy" };
+    rec.pollBusy = true;
+    rec.loopPhase = "pre-landed";
+    rec.armed = null;
+    return { ok: true, anchor: rec.anchor, token: rec };
+  }
+
+  /** Give a `claimForFillOnce` claim back (see `claimForFillOnce` for why it is keyed by the token). */
+  releaseFillOnce(paneId: string, token: object): void {
+    const rec = this.panes.get(paneId);
+    if (rec === undefined || rec !== token) return;
+    rec.pollBusy = false;
+    rec.loopPhase = "none";
+  }
+
+  /** `fill_once`: the credential programs (ssh / sudo / su / doas) running under the pane's ANCHORED shell,
+   *  as pid → creation time, from one process snapshot; null when the pane is not anchored. A prompt the
+   *  assistant merely PRINTED has no such process; a real one does (PR #806 Opus P1). */
+  credentialProcessesOf(paneId: string): Map<number, number> | null {
+    const rec = this.panes.get(paneId);
+    if (rec === undefined) return null;
+    const snap = this.deps.snapshot();
+    const out = new Map<number, number>();
+    const children = new Map<number, number[]>();
+    for (const [pid, parentPid] of snap.parentMap) {
+      const arr = children.get(parentPid);
+      if (arr === undefined) children.set(parentPid, [pid]);
+      else arr.push(pid);
+    }
+    const seen = new Set<number>([rec.anchor.shellPid]);
+    const frontier: number[] = [rec.anchor.shellPid];
+    while (frontier.length > 0) {
+      const parent = frontier.pop() as number;
+      for (const pid of children.get(parent) ?? []) {
+        if (seen.has(pid)) continue;
+        seen.add(pid);
+        frontier.push(pid);
+        const id = snap.identify(pid);
+        if (CREDENTIAL_PROGRAMS.has(id.name) && id.startTimeMs !== 0) out.set(pid, id.startTimeMs);
+      }
+    }
+    return out;
+  }
+
   /** Panes with a credential dispatch awaiting a prompt (the wiring polls exactly these). */
   armedPaneIds(): string[] {
     const out: string[] = [];
@@ -635,7 +697,7 @@ export class KeyLockerCaptureDriver {
       // PRE-DIALOG probe (layer 2 — see `failsafeDeclines`): the secure capture dialog must not open
       // while the stop is armed. `{ captured: false }` is the loop's existing "user gave nothing"
       // path (`capture_cancelled`): no secret is ever requested, stored, or touched.
-      capture: async (id) => ((await this.failsafeDeclines()) ? { captured: false } : this.deps.capture(id)),
+      capture: async (id, b) => ((await this.failsafeDeclines()) ? { captured: false } : this.deps.capture(id, b)),
       deleteSecret: (id) => this.deps.deleteSecret(id),
       // INJECTION-INSTANT re-check (Codex R4 line 524 — the AUTHORITATIVE disclosure guard). The poll's
       // early-decline ran BEFORE the loop; but `confirmPolicyFor`/`confirmInjection`/`capture` (a secure UI

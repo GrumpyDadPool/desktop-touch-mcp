@@ -44,7 +44,7 @@ import { registerExcludedPid, unregisterExcludedPid } from "./tool-exclusion.js"
 export const HELPER_EXE = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "bin", "key-locker.exe");
 
 /** Wire protocol version the MCP understands; must match the helper's `hello.v`. */
-export const KEY_LOCKER_PROTOCOL_VERSION = "1";
+export const KEY_LOCKER_PROTOCOL_VERSION = "2";
 
 export type KeyLockerErrorCode =
   | "KeyLockerSpawnFailed"
@@ -134,6 +134,10 @@ export interface InjectTarget {
   shellStartMs: number;
   /** Append Enter after the secret. */
   submit?: boolean;
+  /** fill_once (PR #806): write only while the console has echo OFF (a real password read); else the
+   *  locker aborts `echo_on`. A staged `Read-Host` / `set /p` prompt echoes, and the secret would be
+   *  readable back from the pane. */
+  requireEchoOff?: boolean;
 }
 
 /** Git credential-field context bound into a ticket for serve-time `context_mismatch` (§3.1). */
@@ -148,7 +152,10 @@ export interface MintTicketContext {
  *  but stays in the union for wire back-compat so `normalizeAbort` never downgrades an in-flight old reply. */
 export type InjectAbortCode =
   | "target_mismatch" | "target_gone" | "not_foreground" | "target_multiplexed"
-  | "no_secret" | "bad_target" | "executor_failed";
+  | "no_secret" | "bad_target" | "executor_failed"
+  // PR #806: a fill_once write (`requireEchoOff`) found the console ECHOING input — a staged prompt, not a
+  // real password read. Nothing was written.
+  | "echo_on";
 
 /** `inject` result: verified+injected, or a typed abort code. */
 export type InjectClientResult =
@@ -172,7 +179,7 @@ export type PromptChoice = ConfirmChoice | OfferChoice;
 
 const INJECT_ABORT_CODES: readonly InjectAbortCode[] = [
   "target_mismatch", "target_gone", "not_foreground", "target_multiplexed",
-  "no_secret", "bad_target", "executor_failed",
+  "no_secret", "bad_target", "executor_failed", "echo_on",
 ];
 
 /** Map a wire `e` string onto a known abort code so `InjectClientResult.code` never lies. */
@@ -362,7 +369,8 @@ export class KeyLockerHost {
         if (hello.v !== KEY_LOCKER_PROTOCOL_VERSION) {
           reject(new KeyLockerError(
             "KeyLockerHandshakeRejected",
-            `locker protocol '${hello.v}' != expected '${KEY_LOCKER_PROTOCOL_VERSION}'`,
+            `locker protocol '${hello.v}' != expected '${KEY_LOCKER_PROTOCOL_VERSION}' — bin/key-locker.exe is from a ` +
+              `different desktop-touch version than this server; reinstall the same version (a restart does not fix it)`,
           ));
           return;
         }
@@ -429,9 +437,22 @@ export class KeyLockerHost {
    * Open the secure dialog for `key`, capture + DPAPI-store the secret, and verify it in-process.
    * The secret NEVER crosses the pipe — only {captured, rt} come back. `captured=false` means the
    * user cancelled. Uses the long capture budget (blocks on human input).
+   *
+   * `dialog` (optional, secret-free) tells the user what the entry is for: `label` names the target
+   * (a binding's display URI, or the locker console a `fill_once` writes into); `note` is the assistant's
+   * stated reason, which the dialog marks as the assistant's words; `purpose: "fill_once"` makes it a
+   * one-time entry, held in the helper's memory only (never written to store.json). Without `label` the dialog falls back to the opaque key, as before; an
+   * older locker ignores the extra fields.
    */
-  async capture(key: string): Promise<{ captured: boolean; rt: boolean }> {
-    const reply = await this.request("capture", key, CAPTURE_TIMEOUT_MS);
+  async capture(
+    key: string,
+    dialog?: { label?: string; note?: string; purpose?: "save" | "fill_once" },
+  ): Promise<{ captured: boolean; rt: boolean }> {
+    const extra: Record<string, unknown> = {};
+    if (dialog?.label !== undefined) extra.label = dialog.label;
+    if (dialog?.note !== undefined) extra.note = dialog.note;
+    if (dialog?.purpose !== undefined) extra.purpose = dialog.purpose;
+    const reply = await this.request("capture", key, CAPTURE_TIMEOUT_MS, extra);
     return { captured: reply.captured === true, rt: reply.rt === true };
   }
 
