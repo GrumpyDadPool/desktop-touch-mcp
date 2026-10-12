@@ -178,6 +178,12 @@ Record every narrowing here so the exceptions stay visible:
   and Notepad with before/after screenshots. That pass is what caught the wrong
   "one notch = one line of text" figure in the CHANGELOG and the shipped `scroll`
   tool description — a narrowed dogfood still earns its place.
+- **v2.3.0 (2026-10-12)** — no dogfood pass; smoke only (build, HTTP 6/6, npx). This is NOT a
+  diff-confined narrowing: the release carries everything merged since 2.2.0 (the macOS preview,
+  the background-reading change, the tool-schema descriptions, `key_locker` `fill_once`). The user
+  decided to release on what had been measured and patch the next day if needed. What was measured:
+  the fill_once real-machine cells F1–F11 on cddb1152. Not run: E1–E3, the echo-off read added
+  just before release (ac897c30); a misread fails closed (`echo_on`, nothing typed).
 
 ### HTTP Transport Verification (Required)
 
