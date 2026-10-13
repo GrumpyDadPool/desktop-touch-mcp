@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.3.1] - 2026-10-13 — ssh key passphrases in fill_once, a key locker that exits with the server, and two false successes refused
 
 ### Fixed — Windows
 - `key_locker` `fill_once` now accepts ssh's key passphrase prompt (`Enter passphrase for key '…':`).
