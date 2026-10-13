@@ -27,6 +27,7 @@ import { offDesktopTarget } from "./_off-desktop.js";
 import type { TouchAction } from "../engine/world-graph/guarded-touch.js";
 import { assertCoordinateReachable } from "../engine/reachable-bounds.js";
 import { classifyUiaRouteFailure, describeUiaRouteFailure } from "../engine/uia-route-failure.js";
+import type { ValueWriteAddress } from "../engine/uia-bridge.js";
 import { WindowExcludedError } from "../engine/tool-exclusion.js";
 import { probeAim, aimProbeEnabled, readWindowIdentity } from "../engine/aim-probe.js";
 import { whoIsUnderPoint, type PointOwner } from "../engine/point-owner.js";
@@ -50,6 +51,7 @@ import {
   ValueNotAppliedError,
   AIM_WINDOW_GONE,
   VALUE_NOT_APPLIED,
+  ELEMENT_AMBIGUOUS,
 } from "../engine/aim.js";
 import type { TargetSpec } from "../engine/world-graph/session-registry.js";
 import type { AdvertisedExecutorKind } from "../capabilities/registry.js";
@@ -145,7 +147,7 @@ export interface ExecutorDeps {
    */
   uiaSelect(windowTitle: string, name?: string, automationId?: string, controlType?: string, hwnd?: bigint): Promise<{ focusedBy?: string; selected?: boolean; notified?: boolean } | void>;
   /** UIA ValuePattern: type text into a textbox. `hwnd` as in {@link ExecutorDeps.uiaClick}. */
-  uiaSetValue(windowTitle: string, value: string, name?: string, automationId?: string, hwnd?: bigint): Promise<{ focusedBy?: string } | void>;
+  uiaSetValue(windowTitle: string, value: string, name?: string, automationId?: string, hwnd?: bigint, address?: ValueWriteAddress): Promise<{ focusedBy?: string } | void>;
   /** CDP: click a DOM element by CSS selector. */
   cdpClick(selector: string, tabId?: string): Promise<void>;
   /** CDP: fill a text input by CSS selector.
@@ -1608,6 +1610,32 @@ function uiaAddressAxes(aimTitle: string | undefined, aimHwnd: bigint | undefine
 }
 
 /**
+ * internal #289 — what the discovered entity says about its element, for the value write to find that
+ * element and not the first whose name contains its name. MEASURED win2 (2026-10-14, FX289): every
+ * WinForms control carried its own handle and no WPF control did; discover's name equalled the
+ * native Name byte for byte. The name is marked as the read's own only when it is `locator.uia.name`
+ * — the executor puts `entity.label` in its place when that is absent.
+ */
+function valueWriteAddress(entity: UiEntity): ValueWriteAddress {
+  const uia = entity.locator?.uia;
+  return {
+    ...(uia?.nativeWindowHandle !== undefined && { elementHwnd: uia.nativeWindowHandle }),
+    ...(entity.controlType !== undefined && { controlType: entity.controlType }),
+    ...(entity.rect !== undefined && { rect: entity.rect }),
+    ...(uia?.name !== undefined && uia.via !== undefined && { nameReadBy: uia.via }),
+  };
+}
+
+/** The probe row's presence-only view of a {@link ValueWriteAddress}. */
+function valueAddressCarried(address: ValueWriteAddress) {
+  return {
+    elementHwnd: address.elementHwnd !== undefined,
+    exactName: address.nameReadBy === "native" && address.controlType !== undefined,
+    rect: address.rect !== undefined,
+  };
+}
+
+/**
  * The window axis alone, for the one road that addresses a window and no element by name: the keyboard
  * rung finds its receiver by handles (`receiver*` on its row), so `addressedBy` / `addressedElementBy`
  * would describe a call it does not make. Its rows carry this field only (internal #157: they carried
@@ -2792,7 +2820,8 @@ export function createDesktopExecutor(
           throw new WinFormsComboWriteRefusedError(entity, action, aimHwnd, winTitle);
         }
         try {
-          const written = await d.uiaSetValue(winTitle, text, name, automationId, aimHwnd);
+          const valueAddress = valueWriteAddress(entity);
+          const written = await d.uiaSetValue(winTitle, text, name, automationId, aimHwnd, valueAddress);
           // ADR-036 family 2, observation only — WHAT THIS CALL ADDRESSED BY.
           //
           // Measured on 2026-09-15 (win2, internal#106 round): a title-only act down this road
@@ -2945,6 +2974,10 @@ export function createDesktopExecutor(
             // `resolveWindowTarget` return `null` on purpose. A partial title reaches the backends
             // as a partial title, and the substring rule below is what decides which window answers.
             addressedWindowBy: addressed.addressedWindowBy,
+            // internal #289 — what else the call carried to find its element, presence only. Beside
+            // `addressedElementBy` rather than in it: that field keeps meaning what it meant on the
+            // rows already recorded. Still the CALL's half, not which element answered.
+            valueAddressCarried: valueAddressCarried(valueAddress),
           });
           return "uia";
         } catch (uiaErr) {
@@ -2964,6 +2997,20 @@ export function createDesktopExecutor(
               { cause: uiaErr },
               `UI Automation accepted the value for "${quotedLabel(entity)}", but its value read back unchanged for a moment ` +
               `after the write, so this act does not report it written and tried nothing else. Re-run desktop_discover and check the field before writing again.`,
+            );
+          }
+          // internal #289 — several elements have the entity's exact name and type, and its rect no
+          // longer tells them apart. Not a rung: the keyboard rung would type into whatever holds the
+          // focus, and a windowless field (WPF) has no handle to check that against. Refused as
+          // `entity_not_found`, whose recovery — discover again — reads the rects that tell them apart.
+          if ((uiaErr as { uiaCode?: unknown } | null)?.uiaCode === ELEMENT_AMBIGUOUS) {
+            probeRefusal("uia_set_value", "entity_not_found", aimHwnd, entity, { routeFailure: "element_ambiguous", addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
+            throw new TargetGoneError(
+              `UIA found several elements named exactly like "${entity.label ?? entity.entityId}", and its rect no longer tells them apart. Not typing it another way.`,
+              { cause: uiaErr },
+              `Several fields in that window have the exact name and type of "${quotedLabel(entity)}", and its position ` +
+              `from desktop_discover no longer tells them apart (the window may have scrolled or moved), so nothing was written. ` +
+              `Re-run desktop_discover and act on the new lease.`,
             );
           }
           // internal #216 — a window that did not answer is not a rung either. The keyboard rung reads
@@ -3541,13 +3588,19 @@ function getSharedRealDeps(): ExecutorDeps {
       };
     },
 
-    async uiaSetValue(windowTitle, value, name, automationId, hwnd) {
+    async uiaSetValue(windowTitle, value, name, automationId, hwnd, address) {
       const { setElementValue } = await import("../engine/uia-bridge.js");
-      const r = await setElementValue(windowTitle, value, name, automationId, hwnd !== undefined ? { hwnd } : undefined);
+      const r = await setElementValue(windowTitle, value, name, automationId, {
+        ...(hwnd !== undefined && { hwnd }),
+        ...(address !== undefined && { address }),
+      });
       if (!r.ok && r.code === AIM_WINDOW_GONE) throw new AimedWindowGoneError(hwnd, r.error);
       // Internal #182 — the provider took the write and the value did not move. Typed here, where the
       // backend's code is read, so the ladder can refuse it before the keyboard rung.
       if (!r.ok && r.code === VALUE_NOT_APPLIED) throw new ValueNotAppliedError(r.error ?? "UIA SetValue changed nothing");
+      // internal #289 — several elements matched exactly and the rect could not pick one. Typed here, so
+      // the ladder refuses it before the keyboard rung, whose receiver would be a guess too.
+      if (!r.ok && r.code === ELEMENT_AMBIGUOUS) throw Object.assign(new Error(r.error ?? "UIA value target is ambiguous"), { uiaCode: ELEMENT_AMBIGUOUS, uiaVia: r.via });
       // Which client answered, carried on the error as `uiaClick` carries it: the type road's item 16
       // believes a "not found" only from the native client, about an entity the native client read.
       if (!r.ok) throw Object.assign(new Error(r.error ?? "UIA setElementValue failed"), { uiaVia: r.via });
