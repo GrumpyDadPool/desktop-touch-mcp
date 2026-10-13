@@ -35,7 +35,7 @@ import {
 } from "../engine/key-locker/pane-id.js";
 import { getProcessIdentityByPid } from "../engine/win32.js";
 import { inject } from "../engine/key-locker/injector.js";
-import { runFillOnce, type FillOnceOutcome } from "../engine/key-locker/fill-once.js";
+import { runFillOnce, widenForFillOnce, type FillOnceOutcome } from "../engine/key-locker/fill-once.js";
 import {
   KeyLockerCaptureDriver,
   type CaptureDriverDeps,
@@ -166,7 +166,8 @@ export class KeyLockerWiring {
     if (this.eventSubId !== null) { unsubscribe(this.eventSubId); this.eventSubId = null; }
     setTerminalDispatchHook(null);
     setCredentialAdvisor(null);
-    return this.manager.dispose().catch(() => {});
+    // close(), not dispose(): an op that fails because the host is going away must not start a new one (#282).
+    return this.manager.close().catch(() => {});
   }
 
   /**
@@ -288,7 +289,7 @@ export class KeyLockerWiring {
         sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
         // "per-tool": this is a foreground tool call, so a refusal shows the user the usual notice.
         checkFailsafe: () => checkFailsafe("per-tool"),
-        readPromptTail: (id) => this.readPromptTail(id),
+        readPromptTail: (id) => this.readFillOncePromptTail(id),
         mintOpaqueId: () => randomUUID(),
         capture: (id, dialog) =>
           m.withHost((h) => h.capture(id, { label: dialog.label, note: dialog.note, purpose: "fill_once" }))
@@ -436,6 +437,12 @@ export class KeyLockerWiring {
     const line = lastNonEmptyPromptLine(raw.text);
     const isCredentialPrompt = line !== null && /:\s*$/.test(line) && isSecretInputPrompt(raw.text);
     return { isCredentialPrompt, tail: raw.text, stillHiddenPrompt: isCredentialPrompt };
+  }
+
+  /** fill_once's prompt read: the loop's verdict, widened to OpenSSH's key-unlock prompts
+   *  (`widenForFillOnce`, internal#280). Never used by the capture loop. */
+  private async readFillOncePromptTail(paneId: string): Promise<PromptVerdict | null> {
+    return widenForFillOnce(await this.readPromptTail(paneId));
   }
 
   /** Mode-B readPaneAfterAuth (gap5): BOUNDED POLL until the hidden prompt clears or the window elapses — an

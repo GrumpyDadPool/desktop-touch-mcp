@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.3.1] - 2026-10-13 — a click on a list item selects it, ssh key passphrases in fill_once, and guarded clicks under overlays
+
+### Changed — Windows
+- **A `desktop_act` click on a list, tree or grid item now selects it.** To open or run the item, use
+  `action:"invoke"`. Before, the click went through UI Automation's Invoke, which acts as a double-click
+  on list items: Explorer opened the file, and list boxes reported a double-click. A WinForms list view's
+  Invoke did nothing, yet answered `ok:true`; a WinForms DataGridView cell's Invoke started editing it. A
+  list item is now selected through UI Automation, and a Win32 or WinForms list box is told of the new
+  selection the way a real click tells it. A tree item, and an item UI Automation cannot select (a
+  DataGridView cell), are clicked with a single mouse click instead, checked against their window as any
+  coordinate click is. Chromium-based content (UI Automation FrameworkId "Chrome") keeps Invoke, and
+  buttons, other controls and `click_element` are unchanged.
+
+### Fixed — Windows
+- `key_locker` `fill_once` now accepts ssh's key passphrase prompt (`Enter passphrase for key '…':`).
+  It was declined with `not_at_prompt`. Autofill of saved credentials is unchanged.
+- When the server exits while a key locker dialog is open, the dialog now closes and the locker exits with
+  it, and nothing typed into it is saved or typed anywhere. Before, the dialog stayed on screen after the
+  server was gone, and a server that shut down normally could leave a second, windowless locker running.
+- A `desktop_act` click whose UI Automation press failed after it was sent is now refused with
+  `aim_route_failed`, saying the press may already have happened: look at the window before pressing
+  again. Before, it fell back to a mouse press at the same point, and when the press had closed its
+  own window, it answered that nothing was clicked.
+- `desktop_act` `type` / `setValue` into a WinForms editable combo box is now refused with `executor_failed`,
+  and nothing is written. UI Automation changed its text on screen without the application seeing the
+  change, so the act answered `ok:true` while the application kept the old value. The reply says how to
+  write it so the application sees it: click the box, type with `keyboard`, then move the focus away.
+  A WinForms drop-down list, a WPF combo box and other text fields are unchanged.
+- A `mouse_click` that names its window (`windowTitle` or `hwnd`) is no longer refused with
+  `AutoGuardBlocked` everywhere under a click-through full-screen overlay, such as the one Dell's display
+  manager draws. The guard now asks Windows which window a click at that point would reach, the same
+  question `desktop_act` already asks. Before, it judged by window rectangles alone, so the overlay
+  covered every point (a known issue since 2.0.0). `mouse_drag`'s checks against dragging across windows or
+  out of a tab strip ask the same question, so they still refuse those drags under such an overlay.
+
 ## [2.3.0] - 2026-10-12 — macOS preview, one-time password fill for the key locker, and quieter background reading
 
 ### Added — macOS (preview)

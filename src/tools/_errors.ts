@@ -502,7 +502,8 @@ const SUGGESTS: Record<string, string[]> = {
     "if_unexpected.detail says which failure it was when the backend's answer is one this server recognises — the element was not found, or the element the route matched does not support this action through UI Automation, is disabled, or is read-only — and says nothing more when it is not: on this road an unrecognised answer can be a shell rejection carrying the command that produced it. Not found: re-discover. No pattern for this action (a custom-drawn button, a canvas): act on a different affordance or reach it by keyboard navigation. Disabled: find what enables it before trying again. Read-only: it does not take typed text — act on the control that edits it, or read the value instead. The route matches by name, so when another element's name contains the same text, the answer can be about that element.",
     "When the detail names no failure, or says the element was not found: re-run {tool:reidentify_element} — the attempt on the window this act named failed, and the entity may have changed name, moved in the tree, or gone. For the other failures it names, re-discovering does not help: a disabled element is left out of the list until it is enabled, and the others come back giving the same answer until their state changes.",
     "Do NOT fall back to mouse_click on the entity's rect. A coordinate is not aimed at any window, and when the detail says disabled the control would not take the press either — the ladder stopped here rather than making one that does not do what was asked.",
-    "For a click: click_element(name=…) is worth one try while the entity is on screen — it re-resolves the element through the accessibility API instead of reusing the lease's locator, and controlType narrows it when the route matched another element by the same text. It runs the same enabled and pattern checks, so a disabled element gives it the same answer.",
+    "When the detail says the window stopped answering during the press or write, or that the press call failed after it was made: it may already have happened. Look at the window first (desktop_state, or a screenshot of it); do NOT press again, click_element included — that would be a second press.",
+    "Otherwise, for a click: click_element(name=…) is worth one try while the entity is on screen — it re-resolves the element through the accessibility API instead of reusing the lease's locator, and controlType narrows it when the route matched another element by the same text. It runs the same enabled and pattern checks, so a disabled element gives it the same answer.",
     "For type / setValue: both the UIA value route and the background write are already spent. A foreground type delivers to whatever holds focus, so bring the intended window forward first and confirm it is the one you named; otherwise re-discover and act on the fresh entity.",
   ],
   // ADR-036 family 2 — the keyboard rung refused to post, because the characters would not have
@@ -1367,8 +1368,17 @@ export function getSuggestsForCode(code: string): string[] {
  * - `type` / `setValue` — the type ladder and the re-identify line; the click remedies are not.
  * - anything else (`auto`, `select`, absent) — the whole list, as before: the act's road is not
  *   known from its name.
+ *
+ * `adviceClass` is chosen by the refusal's CLASS, and wins over both: an omitted or `auto` action is
+ * the common case, and its whole list would offer the very presses the refusal declined (internal #233).
  */
-export function executorFailedAdviceFor(action: string | undefined, noRouteTried: boolean): string[] {
+export function executorFailedAdviceFor(
+  action: string | undefined,
+  noRouteTried: boolean,
+  adviceClass?: ExecutorFailedAdviceClass,
+): string[] {
+  if (adviceClass === "collection_item_select") return [...COLLECTION_ITEM_SELECT_ADVICE];
+  if (adviceClass === "collection_item_select_no_invoke") return COLLECTION_ITEM_SELECT_ADVICE.filter((l) => !l.includes("action:'invoke'"));
   if (noRouteTried) return [EXECUTOR_FAILED_NO_ROUTE_TRIED];
   const all = SUGGESTS.ExecutorFailed ?? [];
   // Picked from the list by what each line is about, so the list stays the one source of the
@@ -1386,6 +1396,21 @@ export function executorFailedAdviceFor(action: string | undefined, noRouteTried
   if (action === "type" || action === "setValue") return [typeLadder(), reidentify()];
   return [...all];
 }
+
+/** The refusal classes with advice of their own (`executorFailedAdviceFor`). */
+export type ExecutorFailedAdviceClass = "collection_item_select" | "collection_item_select_no_invoke";
+
+/**
+ * internal #233 — `CollectionItemSelectRefusedError` (`desktop-executor.ts`): a click on a list, tree or
+ * grid item that was not made. No click_element (its Invoke opens, runs or edits the item) and no
+ * mouse_click. `_no_invoke` (discover read no InvokePattern on the item) drops the invoke line: it would
+ * send the caller to an act that cannot run.
+ */
+const COLLECTION_ITEM_SELECT_ADVICE: readonly string[] = [
+  "Follow detail: it says what was and was not done to this item, and what to do instead",
+  "To open or run the item rather than select it, use desktop_act(action:'invoke')",
+  "Re-run desktop_discover and act on a fresh lease — the item may have moved, changed or gone since it was read",
+];
 
 // The one line for an `executor_failed` refused before any route ran (internal #242).
 const EXECUTOR_FAILED_NO_ROUTE_TRIED =

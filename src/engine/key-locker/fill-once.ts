@@ -28,6 +28,7 @@
 //     failed erase reported as `cleanupFailed`.
 // The session being UNKNOWN or nested is deliberately NOT a gate: nothing is derived from it or bound to it.
 
+import { stripAnsi } from "../ansi.js";
 import type { PaneAnchor } from "./inject-target.js";
 import type { PromptVerdict } from "./key-locker-capture-driver.js";
 
@@ -92,6 +93,46 @@ export type FillOnceOutcome = (
    *  in the locker store under an id nothing points to. Reported, never swallowed (PR #806 codex P2). */
   cleanupFailed?: true;
 };
+
+/** The prompt forms `fill_once` accepts BEYOND the loop's classifier (`readPromptTail`'s password /
+ *  passphrase / sudo patterns): OpenSSH's key-unlock prompts, which name the key AFTER the word —
+ *  `Enter passphrase for key 'C:\Users\a\.ssh\id_ed25519':`. internal#280: it declined `not_at_prompt`. The
+ *  same shape also covers `ssh-add`'s `Enter passphrase for <path>:` and a Unix ssh's security-key
+ *  `Enter PIN for … key …:` — reachable only INSIDE an ssh session (a local `ssh-add` with no ssh under the
+ *  shell still declines `no_credential_program`; Windows OpenSSH asks for a security-key PIN in a Windows
+ *  dialog, not the console).
+ *  Only here, not in the capture loop: the loop fills a stored HOST password, and writing that into a KEY
+ *  passphrase prompt would be the wrong secret (and its capture would bind a passphrase to the host).
+ *  Here the user types the secret for the prompt they see. Anchored at the prompt's start and the final
+ *  colon; the credential-program and echo-off gates still apply.
+ *
+ *  A long key path soft-wraps. Classic conhost's read keeps a logical line whole (padded to a multiple of the
+ *  width — measured on win2, PR #812), so its cursor row already matches; Windows Terminal's read is said to
+ *  break the row at the wrap (PR #812 codex P2; not measured — no wt on the rig), leaving `id_ed25519':`.
+ *  So the cursor row and the rows directly above it (up to KEY_UNLOCK_MAX_ROWS) are joined with all whitespace removed (a wrap may fall on a space, and the read may
+ *  pad or trim it). A match still has to START a row with `Enter` and END the cursor row with the colon.
+ *  Joined rows only take ssh's own quoted form `Enter passphrase for key '<path>':` with no quote inside the
+ *  path: `.+` across rows would also span an ANSWERED prompt, its output and a later row ending in `:`. */
+const KEY_UNLOCK_ROW = /^Enter(?:passphrase|PIN)for.+:$/i;
+const KEY_UNLOCK_WRAPPED = /^Enterpassphraseforkey'[^']+':$/i;
+const KEY_UNLOCK_MAX_ROWS = 6;
+
+export function isKeyUnlockPrompt(tail: string | null): boolean {
+  if (!tail) return false;
+  const rows = stripAnsi(tail).replace(/\r\n/g, "\n").split("\n");
+  while (rows.length > 0 && rows[rows.length - 1]!.trim() === "") rows.pop();
+  for (let k = 1; k <= KEY_UNLOCK_MAX_ROWS && k <= rows.length; k++) {
+    const joined = rows.slice(rows.length - k).join("").replace(/\s+/g, "");
+    if ((k === 1 ? KEY_UNLOCK_ROW : KEY_UNLOCK_WRAPPED).test(joined)) return true;
+  }
+  return false;
+}
+
+/** fill_once's verdict: the loop's, widened to the key-unlock prompts read from its own `tail`. */
+export function widenForFillOnce(v: PromptVerdict | null): PromptVerdict | null {
+  if (v === null || v.isCredentialPrompt || !isKeyUnlockPrompt(v.tail)) return v;
+  return { ...v, isCredentialPrompt: true, stillHiddenPrompt: true };
+}
 
 /** A `busy` claim is retried this many times, this far apart (the poll's hold is one prompt read). */
 const BUSY_RETRIES = 5;
