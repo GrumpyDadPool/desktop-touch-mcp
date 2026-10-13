@@ -2157,6 +2157,12 @@ export class KeyboardCannotReplaceError extends Error implements CallerFacingRef
 }
 
 /**
+ * The longest title, as written into a call (quoted and escaped), that the combo refusal repeats in each of
+ * its calls, so the sentence fits the 1,000-character detail cap with a 200-character label.
+ */
+const COMBO_ADVICE_TITLE_MAX = 60;
+
+/**
  * internal #238 — a type or setValue into a WinForms editable combo box (`winforms-combo.ts`). UI Automation
  * changes its text without the application seeing the change, so the write is not made and the caller is
  * told how to make one the application does see. `executor_failed`, with this sentence as its `detail`.
@@ -2165,7 +2171,7 @@ export class WinFormsComboWriteRefusedError extends Error implements CallerFacin
   readonly callerDetail: string;
   /** Refused before any route ran (internal #242). */
   readonly noRouteTried = true as const;
-  constructor(entity: UiEntity, action: "type" | "setValue", aimHwnd?: bigint) {
+  constructor(entity: UiEntity, action: "type" | "setValue", aimHwnd: bigint | undefined, aimTitle: string | undefined) {
     super(`not writing "${entity.label ?? entity.entityId}" through UI Automation: a WinForms combo box does not see that change`);
     this.name = "WinFormsComboWriteRefusedError";
     // Each step measured by win2 on FX238 (2026-10-13): desktop_act click on a window named by title lands as a
@@ -2176,23 +2182,43 @@ export class WinFormsComboWriteRefusedError extends Error implements CallerFacin
     // On the handle road the point is in the sentence: discover shows `rect` only to debug calls, so a caller
     // told "at its rectangle" would have no coordinates to pass (PR #815 codex P2). mouse_click with the hwnd
     // guards that the point is inside that window.
+    //
+    // Every keyboard call names the window: keyboard refuses a call with neither windowTitle nor hwnd
+    // (DestinationRequired), and the advice copied as written failed that way, 3/3 (win2, 2.3.1 dogfood D3).
+    //
+    // By handle wherever one is known, the window discover read included: a title can be long enough to push
+    // the last steps past the 1,000-character detail cap in `guarded-touch.ts` (PR #817 codex P2). Without a
+    // handle, a prefix of the title — keyboard matches windowTitle by substring, so the prefix still names it.
+    const keyHwnd = aimHwnd ?? observedHwndOfOrigin(entity.origin);
+    // The bound is on the title as written into the call, after escaping: a backslash or quote doubles in
+    // JSON, so a 60-character cut taken before escaping could still overflow (PR #817 codex P2).
+    //
+    // KEPT AS A PREFIX, knowingly. A prefix can match a sibling window that shares it (PR #817 codex P2 on
+    // b3909203), and the full title can push the last steps past the cap (the two P2s before it): the two
+    // reviews ask for opposite things on this line. It is reached only with no handle at all — neither the
+    // act's nor the one discover read the entity in — which no measured road produced; both measured roads
+    // name the window by handle. Every call here also goes through keyboard's own guard, which names the
+    // window it focused. Revisit if a handle-less road is ever measured.
+    let title = aimTitle !== undefined && aimTitle.trim() !== "" ? aimTitle : "@active";
+    while (JSON.stringify(title).length > COMBO_ADVICE_TITLE_MAX) title = title.slice(0, -1);
+    const win = keyHwnd !== undefined ? `hwnd:'${keyHwnd}'` : `windowTitle:${JSON.stringify(title)}`;
     let click: string;
     if (aimHwnd === undefined) {
       click = `Click it — desktop_act(action:'click').`;
     } else {
       const r = entity.rect;
       const at = r !== undefined
-        ? `mouse_click({hwnd:'${aimHwnd}', x:${Math.round(r.x + r.width / 2)}, y:${Math.round(r.y + r.height / 2)}}), the centre of its rectangle when discover read it`
-        : `mouse_click({hwnd:'${aimHwnd}', x, y}) at its clickAt from screenshot({detail:'text', hwnd:'${aimHwnd}'})`;
+        ? `mouse_click({${win}, x:${Math.round(r.x + r.width / 2)}, y:${Math.round(r.y + r.height / 2)}}), the centre of its rectangle when discover read it`
+        : `mouse_click({${win}, x, y}) at its clickAt from screenshot({detail:'text', ${win}})`;
       click = `Click it with ${at} (desktop_act's click is refused on a window named by handle).`;
     }
     const put = action === "setValue"
-      ? ` The click selects its old text; if it did not, select it with keyboard Home then Shift+End (ctrl+a does not select in this control).`
-      : ` The click selects its old text, which typing would replace: press keyboard End first to add to it.`;
+      ? ` The click selects its old text; if it did not, select it with keyboard({action:'press', keys:'home', ${win}}) then keyboard({action:'press', keys:'shift+end', ${win}}) (ctrl+a does not select in this control).`
+      : ` The click selects its old text, which typing would replace: press keyboard({action:'press', keys:'end', ${win}}) first to add to it.`;
     this.callerDetail =
       `Nothing was written: "${quotedLabel(entity)}" is a WinForms combo box, and UI Automation can change its text ` +
-      `without the application seeing the change. ${click}${put} Then keyboard({action:'type', text}), and move the ` +
-      `focus away (keyboard Tab) so the application takes it.`;
+      `without the application seeing the change. ${click}${put} Then keyboard({action:'type', text, ${win}}), and ` +
+      `keyboard({action:'press', keys:'tab', ${win}}) to move the focus away so the application takes it.`;
   }
 }
 
@@ -2561,7 +2587,7 @@ export function createDesktopExecutor(
         // screen and the application is not told, so `ok:true` would report a value its model never took.
         // Before the try below, whose catch would hand the refusal to the keyboard rung as a failed write.
         if (d.comboWindowFacts !== undefined && (await editableWinFormsComboOf(entity, d.comboWindowFacts)) !== undefined) {
-          throw new WinFormsComboWriteRefusedError(entity, action, aimHwnd);
+          throw new WinFormsComboWriteRefusedError(entity, action, aimHwnd, winTitle);
         }
         try {
           const written = await d.uiaSetValue(winTitle, text, name, automationId, aimHwnd);
