@@ -10,6 +10,17 @@
   covered every point (a known issue since 2.0.0). `mouse_drag`'s checks against dragging across windows or
   out of a tab strip ask the same question, so they still refuse those drags under such an overlay.
 
+### Changed — Windows
+- **A `desktop_act` click on a list, tree or grid item now selects it.** To open or run the item, use
+  `action:"invoke"`. Before, the click went through UI Automation's Invoke, which acts as a double-click
+  on list items: Explorer opened the file, and list boxes reported a double-click. A WinForms list view's
+  Invoke did nothing, yet answered `ok:true`; a WinForms DataGridView cell's Invoke started editing it. A
+  list item is now selected through UI Automation, and a Win32 or WinForms list box is told of the new
+  selection the way a real click tells it. A tree item, and an item UI Automation cannot select (a
+  DataGridView cell), are clicked with a single mouse click instead, checked against their window as any
+  coordinate click is. Chromium-based content (UI Automation FrameworkId "Chrome") keeps Invoke, and
+  buttons, other controls and `click_element` are unchanged.
+
 ## [2.3.1] - 2026-10-13 — ssh key passphrases in fill_once, a key locker that exits with the server, and two false successes refused
 
 ### Fixed — Windows

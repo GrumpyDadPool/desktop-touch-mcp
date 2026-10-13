@@ -1368,8 +1368,17 @@ export function getSuggestsForCode(code: string): string[] {
  * - `type` / `setValue` — the type ladder and the re-identify line; the click remedies are not.
  * - anything else (`auto`, `select`, absent) — the whole list, as before: the act's road is not
  *   known from its name.
+ *
+ * `adviceClass` is chosen by the refusal's CLASS, and wins over both: an omitted or `auto` action is
+ * the common case, and its whole list would offer the very presses the refusal declined (internal #233).
  */
-export function executorFailedAdviceFor(action: string | undefined, noRouteTried: boolean): string[] {
+export function executorFailedAdviceFor(
+  action: string | undefined,
+  noRouteTried: boolean,
+  adviceClass?: ExecutorFailedAdviceClass,
+): string[] {
+  if (adviceClass === "collection_item_select") return [...COLLECTION_ITEM_SELECT_ADVICE];
+  if (adviceClass === "collection_item_select_no_invoke") return COLLECTION_ITEM_SELECT_ADVICE.filter((l) => !l.includes("action:'invoke'"));
   if (noRouteTried) return [EXECUTOR_FAILED_NO_ROUTE_TRIED];
   const all = SUGGESTS.ExecutorFailed ?? [];
   // Picked from the list by what each line is about, so the list stays the one source of the
@@ -1387,6 +1396,21 @@ export function executorFailedAdviceFor(action: string | undefined, noRouteTried
   if (action === "type" || action === "setValue") return [typeLadder(), reidentify()];
   return [...all];
 }
+
+/** The refusal classes with advice of their own (`executorFailedAdviceFor`). */
+export type ExecutorFailedAdviceClass = "collection_item_select" | "collection_item_select_no_invoke";
+
+/**
+ * internal #233 — `CollectionItemSelectRefusedError` (`desktop-executor.ts`): a click on a list, tree or
+ * grid item that was not made. No click_element (its Invoke opens, runs or edits the item) and no
+ * mouse_click. `_no_invoke` (discover read no InvokePattern on the item) drops the invoke line: it would
+ * send the caller to an act that cannot run.
+ */
+const COLLECTION_ITEM_SELECT_ADVICE: readonly string[] = [
+  "Follow detail: it says what was and was not done to this item, and what to do instead",
+  "To open or run the item rather than select it, use desktop_act(action:'invoke')",
+  "Re-run desktop_discover and act on a fresh lease — the item may have moved, changed or gone since it was read",
+];
 
 // The one line for an `executor_failed` refused before any route ran (internal #242).
 const EXECUTOR_FAILED_NO_ROUTE_TRIED =
