@@ -136,6 +136,44 @@ unsafe fn legacy_take_focus(elem: &IUIAutomationElement) -> &'static str {
     }
 }
 
+/// internal #292 — whether UI Automation's keyboard focus is on `elem` or inside it (a combo box's own
+/// text box), compared as elements, not by name: a field can share its name with a neighbour, or be
+/// renamed since discover, and a composite's inner box has a name of its own (win2 `r292.md`, RN3, R4).
+///
+/// `Some(false)` only when the walk up from the focused element reached the desktop without meeting
+/// `elem`. `None` when the window is not in front — UI Automation reports the foreground's focus, not
+/// the focus a window behind would type into — or when any step could not be read. `None` too for an
+/// element with a window of its own: the keyboard rung compares that window by handle, and does not
+/// read this (gate 2).
+pub(crate) fn focus_inside(ctx: &UiaContext, elem: &IUIAutomationElement) -> Option<bool> {
+    unsafe {
+        if own_window(elem).is_some() || !window_is_in_front(ctx, elem) {
+            return None;
+        }
+        // One call for the common answer: the focus step put it on the element itself.
+        if elem.CurrentHasKeyboardFocus().map(|b| b == true).unwrap_or(false) {
+            return Some(true);
+        }
+        let focused = ctx.automation.GetFocusedElement().ok()?;
+        let root = ctx.automation.GetRootElement().ok()?;
+        // The raw view: an element the control view skips is still met on the way up.
+        let walker = ctx.automation.RawViewWalker().ok()?;
+        let mut current = focused;
+        for _ in 0..WINDOW_SEARCH_DEPTH {
+            if ctx.automation.CompareElements(&current, elem).ok()? == true {
+                return Some(true);
+            }
+            if ctx.automation.CompareElements(&current, &root).ok()? == true {
+                // The foreground can change during the walk (a toast, another app): then the focus read
+                // was another window's, and says nothing about this one (gate 2).
+                return window_is_in_front(ctx, elem).then_some(false);
+            }
+            current = walker.GetParentElement(&current).ok()?;
+        }
+        None
+    }
+}
+
 /// Whether the top-level window `elem` is drawn in is the foreground window: the nearest window found
 /// walking up from the element (Chromium's page sits in a child window of its own), then its root.
 unsafe fn window_is_in_front(ctx: &UiaContext, elem: &IUIAutomationElement) -> bool {

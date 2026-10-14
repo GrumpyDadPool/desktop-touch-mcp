@@ -148,6 +148,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
     };
@@ -169,6 +170,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
     };
@@ -188,6 +190,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
             focused_by: None,
             selected: None,
             notified: None,
+            focus_inside: None,
         });
     }
 
@@ -215,6 +218,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                     focused_by: None,
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 });
             }
         };
@@ -229,6 +233,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                     focused_by: None,
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 });
             }
         };
@@ -250,6 +255,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                 focused_by: Some(focused_by.into()),
                 selected: None,
                 notified: None,
+                focus_inside: None,
             }),
             Err(e) => {
                 // internal #232 — the call was made, so most failures may still follow a press that happened
@@ -276,6 +282,7 @@ fn click_element_impl(ctx: &UiaContext, opts: &ClickElementOptions) -> napi::Res
                     focused_by: Some(focused_by.into()),
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 })
             }
         }
@@ -309,6 +316,7 @@ fn select_item(ctx: &UiaContext, elem: &IUIAutomationElement) -> ActionResult {
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             };
         }
         let sel: IUIAutomationSelectionItemPattern =
@@ -336,6 +344,7 @@ fn select_item(ctx: &UiaContext, elem: &IUIAutomationElement) -> ActionResult {
                             focused_by: None,
                             selected: None,
                             notified: None,
+                            focus_inside: None,
                         };
                     }
                     let (error, code): (String, Option<String>) = if super::is_timeout(&e) {
@@ -351,6 +360,7 @@ fn select_item(ctx: &UiaContext, elem: &IUIAutomationElement) -> ActionResult {
                         focused_by: None,
                         selected: None,
                         notified: None,
+                        focus_inside: None,
                     };
                 }
             };
@@ -375,6 +385,7 @@ fn select_item(ctx: &UiaContext, elem: &IUIAutomationElement) -> ActionResult {
                 focused_by: Some(focused_by.into()),
                 selected: None,
                 notified: None,
+                focus_inside: None,
             };
         }
 
@@ -396,6 +407,7 @@ fn select_item(ctx: &UiaContext, elem: &IUIAutomationElement) -> ActionResult {
                     focused_by: Some(focused_by.into()),
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 };
             }
         };
@@ -408,6 +420,7 @@ fn select_item(ctx: &UiaContext, elem: &IUIAutomationElement) -> ActionResult {
                 focused_by: Some(focused_by.into()),
                 selected: None,
                 notified: None,
+                focus_inside: None,
             };
         }
 
@@ -423,6 +436,7 @@ fn select_item(ctx: &UiaContext, elem: &IUIAutomationElement) -> ActionResult {
             focused_by: Some(focused_by.into()),
             selected: Some(true),
             notified,
+            focus_inside: None,
         }
     }
 }
@@ -519,12 +533,13 @@ fn set_value_impl(
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
     };
 
-    let elem = match find_value_target(ctx, &window, opts) {
-        Ok(e) => e,
+    let (elem, found_exactly) = match find_value_target(ctx, &window, opts) {
+        Ok(found) => found,
         Err(e) => {
             let code = (e.reason == ELEMENT_AMBIGUOUS_TEXT).then(|| "ElementAmbiguous".to_string());
             return Ok(ActionResult {
@@ -535,6 +550,7 @@ fn set_value_impl(
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
     };
@@ -551,6 +567,7 @@ fn set_value_impl(
                     focused_by: None,
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 });
             }
         };
@@ -565,6 +582,7 @@ fn set_value_impl(
                     focused_by: None,
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 });
             }
         };
@@ -584,6 +602,7 @@ fn set_value_impl(
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
 
@@ -617,6 +636,7 @@ fn set_value_impl(
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
 
@@ -665,6 +685,7 @@ fn set_value_impl(
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
         let move_first = !said_read_only || ctx.classic;
@@ -701,6 +722,7 @@ fn set_value_impl(
                         focused_by: Some(focused_by.into()),
                         selected: None,
                         notified: None,
+                        focus_inside: None,
                     });
                 }
                 // After the read-back, not before it: a focus move that reformats the text would
@@ -726,6 +748,7 @@ fn set_value_impl(
                     focused_by: Some(focused_by.into()),
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 })
             }
             // A write that failed on an element that said read-only is named read-only, in words
@@ -738,6 +761,7 @@ fn set_value_impl(
                 focused_by: Some(focused_by.into()),
                 selected: None,
                 notified: None,
+                focus_inside: None,
             }),
             Err(e) => Ok(ActionResult {
                 ok: false,
@@ -747,6 +771,30 @@ fn set_value_impl(
                 focused_by: Some(focused_by.into()),
                 selected: None,
                 notified: None,
+                // internal #292 — the keyboard rung types next, into whatever holds the focus. For a
+                // field with no window of its own the rung cannot compare handles, so where the focus
+                // is now is read here, after the focus step and before anything else moves it.
+                // MEASURED win2 (internal `dev/k292/r292.md`, `53b4bda9`): a WPF field whose SetValue
+                // throws took the characters 9/9 when the focus step had moved the focus into it, even
+                // with the focus on another control before the act — so the focus before the act is
+                // not the fact; and when the field could not take the focus, nothing landed (3/3) or
+                // the characters went into the focused neighbour (3/3), both under `ok:true`.
+                //
+                // Asked only about an element found by its exact name and type: one found by a name
+                // that merely contains the field's is not known to be the field, and its focus says
+                // nothing about where the named field's characters go (gate 2). Not after a timeout:
+                // the walk would wait on the same window that stopped answering, and the caller is
+                // told the write may still land, before any keyboard rung (gate 2). With the deferred
+                // focus move's room left, as for that move: the walk is cross-process too.
+                focus_inside: if found_exactly
+                    && !super::is_timeout(&e)
+                    && submitted.elapsed()
+                        < std::time::Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MS - DEFERRED_FOCUS_ROOM_MS))
+                {
+                    super::focus_first::focus_inside(ctx, &elem)
+                } else {
+                    None
+                },
             }),
         }
     }
@@ -810,11 +858,14 @@ fn value_not_applied(before: Option<&str>, after: Option<&str>, written: &str) -
 /// one; `set_value_impl` answers them with the code `ElementAmbiguous`.
 const ELEMENT_AMBIGUOUS_TEXT: &str = "Two or more elements have this element's exact name and type, and its rect does not tell them apart";
 
+/// The element a value write goes to, and whether it was found by step 2 above — the one road on which
+/// it is known to be the element discover read rather than one whose name merely contains it (internal
+/// #292).
 fn find_value_target(
     ctx: &UiaContext,
     window: &IUIAutomationElement,
     opts: &SetValueOptions,
-) -> napi::Result<IUIAutomationElement> {
+) -> napi::Result<(IUIAutomationElement, bool)> {
     let exact = opts.exact_name == Some(true);
     let name = opts.name.as_deref().filter(|n| !n.is_empty());
     let control_type = opts.control_type.as_deref().filter(|c| !c.is_empty());
@@ -822,7 +873,7 @@ fn find_value_target(
     if let Some(h) = opts.element_hwnd.as_deref()
         && let Some(elem) = element_at_own_handle(ctx, window, h, name, automation_id, control_type, exact, opts.rect.as_ref())
     {
-        return Ok(elem);
+        return Ok((elem, false));
     }
     if let (true, None, Some(name), Some(control_type)) = (exact, automation_id, name, control_type) {
         // Every exact match, not the first few: a form of repeated rows can hold more, and the one the
@@ -836,14 +887,15 @@ fn find_value_target(
             return Err(napi::Error::from_reason(ELEMENT_AMBIGUOUS_TEXT));
         }
         if found.len() == 1 {
-            return Ok(found.into_iter().next().unwrap());
+            return Ok((found.into_iter().next().unwrap(), true));
         }
         if !found.is_empty() {
             return one_at_rect(found, opts.rect.as_ref())
+                .map(|e| (e, true))
                 .ok_or_else(|| napi::Error::from_reason(ELEMENT_AMBIGUOUS_TEXT));
         }
     }
-    find_element_in_window(ctx, window, opts.name.as_deref(), opts.automation_id.as_deref(), None)
+    find_element_in_window(ctx, window, opts.name.as_deref(), opts.automation_id.as_deref(), None).map(|e| (e, false))
 }
 
 /// The element at `hwnd`, when it is still the one discovered: same name (exact or contained, as the
@@ -949,6 +1001,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
     };
@@ -970,6 +1023,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             });
         }
     };
@@ -984,6 +1038,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
             focused_by: None,
             selected: None,
             notified: None,
+            focus_inside: None,
         });
     }
 
@@ -1010,6 +1065,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                     focused_by: None,
                     selected: None,
                     notified: None,
+                    focus_inside: None,
                 })
             }
             Err(_) => Ok(ActionResult {
@@ -1020,6 +1076,7 @@ fn insert_text_impl(ctx: &UiaContext, opts: &InsertTextOptions) -> napi::Result<
                 focused_by: None,
                 selected: None,
                 notified: None,
+                focus_inside: None,
             }),
         }
     }

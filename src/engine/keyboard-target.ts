@@ -47,7 +47,7 @@ export type LandingWhy =
  * word alone (internal #190: a field with no window of its own, which the OS cannot be asked about) —
  * so its sentence says who reported it, and does not claim the field is missing from discover.
  */
-export type RefusalSubject = "named" | "reported_named" | "focused_inside_named" | "focused" | "window" | "host_window";
+export type RefusalSubject = "named" | "reported_named" | "focused_inside_named" | "focused" | "window" | "host_window" | "focus_outside_named";
 
 /**
  * How the act named its window. The way back differs: a text field has no UIA invoke, so the click
@@ -105,6 +105,13 @@ export interface KeyboardFacts {
    * element is READ-ONLY. Optional so a caller that predates it says nothing (read as false).
    */
   valueRoadSaidReadOnly?: boolean;
+  /**
+   * Internal #292 — where the native value writer found UI Automation's keyboard focus right after its
+   * failed write, which comes after it moved the focus to the element: on the element or inside it
+   * (`true`), elsewhere (`false`), or not said (`null`). Asked only when the element's window is in
+   * front; compared as elements, not by name. Optional so a caller that predates it says nothing.
+   */
+  valueRoadFocusInside?: boolean | null;
 }
 
 export type KeyboardVerdict =
@@ -138,6 +145,17 @@ function same(a: bigint, b: bigint): boolean {
  *    window: either can be a same-titled sibling. Not asked is not evidence.
  *    Then, still with no usable E, the value road's "disabled" alone refuses, about the named field
  *    (internal #190: a disabled WPF field in an enabled window was typed into its neighbour).
+ * ½. E has no window of its own, and the value road, just before, found UI Automation's focus outside
+ *    the named element → refuse `other_control`. Such a field cannot be compared by handle (T is then
+ *    R, step 4), so the element's own focus is the fact: WPF takes posted characters into its focused
+ *    element. MEASURED win2 (internal `dev/k292/r292.md`): a field whose SetValue throws, and that
+ *    could not take the focus, answered `ok:true` with nothing typed (3/3) or with the characters in
+ *    the focused neighbour (3/3); where the focus step had moved the focus into it, they landed in it
+ *    9/9 — even with the focus elsewhere before the act. So it is the focus after the value road's
+ *    focus step, not before the act. The writer asks it only of an element found by its exact name
+ *    and type, in a window in front. Not said (`null`) decides nothing. It comes before step 1 because
+ *    it does not depend on T: a receiver that cannot be read would otherwise post (gate 2). Only for
+ *    a field with no window at all — a recorded handle that went stale is not that shape (gate 2).
  * 1. T or its root cannot be read → cannot say.
  * 2. E is usable, and T is E, or E is among T's parents (a partial walk counts), or E is T's root:
  *    the named control or a window inside it. Refuse `read_only` if T does not take typing;
@@ -233,6 +251,9 @@ function judgeTheReceiver(
   const refuse = (ground: KeyboardGround, subject: RefusalSubject): KeyboardVerdict =>
     disabled.has(ground) ? cannotSay(`ground_disabled:${ground}`) : { kind: "refuse", ground, subject, referenceFrom };
 
+  // 0½.
+  if (f.entityHwnd === null && f.valueRoadFocusInside === false) return refuse("other_control", "focus_outside_named");
+
   // 1.
   if (f.receiver === null || f.receiverRoot === null) return cannotSay("receiver_unknown");
   const receiver = f.receiver;
@@ -325,6 +346,13 @@ function callerSentence(ground: KeyboardGround, subject: RefusalSubject, road: K
           ? `Bring the field's window forward (focus_window) and retry — it comes forward with the focus it last had. ${BY_HANDLE_WAY_BACK}`
           : "Click the field this act named, or bring its window forward (focus_window), and retry.");
     case "other_control":
+      if (subject === "focus_outside_named") {
+        // internal #292 — a field that may not take the focus at all: "click it and type again" alone
+        // would send the caller round the same refusal (gate 2), so the sentence says when to stop.
+        return "Nothing was typed (other_control): the field this act named did not take the value, and the keyboard focus was then on another control, not on it, so the characters would have gone there. " +
+          (byHandle ? BY_HANDLE_WAY_BACK + " " : "Click the field this act named (desktop_act action='click' on the same entity), then type again. ") +
+          "If this refusal repeats, the field does not take the keyboard focus, and it cannot be typed into from here.";
+      }
       return "Nothing was typed (other_control): the focus is on a different control in the same window, so the characters would have gone there. " +
         (byHandle
           ? BY_HANDLE_WAY_BACK
