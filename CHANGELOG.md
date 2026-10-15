@@ -12,6 +12,26 @@
   when several match. When the position no longer tells them apart, the act is refused with
   `entity_not_found` and nothing is written. Run `desktop_discover` again before the next act.
   `set_element_value` is unchanged.
+- **`desktop_act` `type` / `setValue` no longer types into another control when a WPF field rejects the
+  value write.** For a field with no window of its own whose value write failed, the background typing
+  that follows could not tell where the characters would go, and answered `ok:true` with
+  `landing.confirmed: false`. When the field could not take the focus, nothing was typed, or the
+  characters went into the control that held the focus. The act now checks, right after the failed write,
+  whether the focus is on the field or inside it. If the focus is elsewhere, it is refused with
+  `keyboard_target_unsafe` (`other_control`) and nothing is typed. The check runs only for a field found
+  by its exact name and control type. When the window is not in front, or the focus cannot be read, it
+  types as before.
+
+### Changed — Windows
+- **`desktop_act` `type` / `setValue` now writes a WinForms editable combo box in a way the application
+  sees.** In 2.3.1 such a write was refused, because UI Automation changed the box's text without the
+  application noticing. The text is now typed into the box's own text field without taking the
+  foreground, and the application takes it when the focus leaves the box, as it would from a person
+  typing. The box's text is then read back. If it differs from what was asked, for example because an
+  AutoComplete completed "ap" to "apple", the act fails with `value_not_applied` and says what the box now
+  holds. When the text cannot be read back in time, the act answers `ok:true` with
+  `landing.confirmed: false`. A line break, tab or other control character is refused before anything is
+  typed. As with other fields, the keyboard focus stays in the box.
 
 ## [2.3.1] - 2026-10-13 — a click on a list item selects it, ssh key passphrases in fill_once, and guarded clicks under overlays
 

@@ -174,6 +174,34 @@ pub struct ActionResult {
     /// internal #233 — on a `select` that took, in a Win32 or WinForms list box that notifies: whether
     /// the `LBN_SELCHANGE` its parent gets from a real click was delivered. `None` when none was due.
     pub notified: Option<bool>,
+    /// internal #292 — on a value write whose `SetValue` failed after the focus step: whether UI
+    /// Automation's keyboard focus is then on the element or inside it (`focus_first::focus_inside`).
+    /// `None` when it was not asked or could not say — and always for a window that is not in front,
+    /// whose focus UI Automation does not report.
+    pub focus_inside: Option<bool>,
+}
+
+/// internal #238 step 2 — what `uia::combo_write::write_combo` did (`win32WriteCombo`).
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ComboWriteResult {
+    /// The characters were posted to the Edit. Not that they landed: compare `text`.
+    pub ok: bool,
+    /// How the focus was moved (`focus_first.rs`), when it was asked.
+    pub focused_by: Option<String>,
+    /// UTF-16 units posted, of `total`.
+    pub posted: u32,
+    pub total: u32,
+    /// The Edit's text, read back after the post; `None` when it could not be read.
+    pub text: Option<String>,
+    /// Whether `text` was read after the marker behind the characters was seen processed. `Some(false)`:
+    /// it was not, and the text had moved to something other than the asked text — the characters may
+    /// still have been arriving.
+    pub processed: Option<bool>,
+    pub error: Option<String>,
+    /// `Gone`, `Moved`, `Disabled`, `NoEdit`, `NotAnswering`, `StoppedAnswering`, `FocusFailed`, `SelectFailed`
+    /// or `PostFailed`.
+    pub code: Option<String>,
 }
 
 // ─── Element bounds ──────────────────────────────────────────────────────────
