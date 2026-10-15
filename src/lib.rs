@@ -200,6 +200,51 @@ pub fn uia_get_focused_and_point(
     AsyncTask::new(UiaGetFocusedAndPointTask(opts))
 }
 
+/// internal #238 step 2 — the caller's limit for a combo write, as `actions.rs` gives a value write.
+#[cfg(windows)]
+const COMBO_WRITE_TIMEOUT_MS: u32 = 8_000;
+
+/// internal #238 step 2 — write a WinForms editable combo box through its inner Edit's own messages.
+#[cfg(windows)]
+pub struct Win32WriteComboTask {
+    combo: u64,
+    value: String,
+    root: Option<u64>,
+}
+
+#[cfg(windows)]
+impl Task for Win32WriteComboTask {
+    type Output = uia::types::ComboWriteResult;
+    type JsValue = uia::types::ComboWriteResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        // The act thread and its limit, as `uia_set_value` (gate 1 on #824): `SetFocus` waits on the window's
+        // thread with no limit of its own. The write's own deadline leaves the select, the post and the
+        // read-back inside the limit: with every bounded send taking its full 300 ms, about 5.1 s (gate 2).
+        let (combo, value, root) = (self.combo, self.value.clone(), self.root);
+        let submitted = std::time::Instant::now();
+        uia::thread::execute_act_with_timeout(
+            move |_ctx| Ok(uia::combo_write::write_combo(combo, &value, root, submitted, std::time::Duration::from_millis(2_500))),
+            COMBO_WRITE_TIMEOUT_MS,
+        )
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// internal #238 step 2 — focus the combo's Edit, select its text, post `value` as characters, and read
+/// the text back. `combo` is the combo box's own window handle; `root`, when given, the top-level window
+/// it was read in, which it must still belong to.
+#[cfg(windows)]
+#[napi]
+pub fn win32_write_combo(combo: BigInt, value: String, root: Option<BigInt>) -> AsyncTask<Win32WriteComboTask> {
+    let (_sign, combo, _lossless) = combo.get_u64();
+    let root = root.map(|r| r.get_u64().1);
+    AsyncTask::new(Win32WriteComboTask { combo, value, root })
+}
+
 /// Get currently focused element info.
 #[cfg(windows)]
 #[napi]
