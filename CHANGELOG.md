@@ -3,6 +3,36 @@
 ## [Unreleased]
 
 ### Fixed — Windows
+- **`browser_click` no longer clicks a point another window covers.** It clicks with the OS cursor, so a
+  window on top of the element took the click while the call answered `ok: true` (Edge's first-run
+  welcome panel did this). After bringing the browser forward and before moving the cursor, it now asks
+  Windows which window is at the point. If it is another window, or a panel, popup or dialog of the
+  browser itself, nothing is clicked and the call fails with `BrowserPointCovered`, naming the window (a
+  window this server may not act through is not named). When Windows' hit test cannot answer, it clicks
+  as before.
+- **A refused click on a list, tree or grid item no longer advises `click_element`.** When such a click
+  was refused because a window covered the point, the pointer could not be placed or reached, or a
+  window this server may not act through was on top (`aim_occluded`, `cursor_placement_blocked`,
+  `coordinate_outside_reachable_bounds`, `aim_blocked_by_excluded_window`), the advice still said
+  `click_element(name=…)` would reach it. On these items its
+  UI Automation Invoke opens, runs or starts editing the item (Explorer opens the file, a grid cell
+  starts editing), and some items have none. The advice now says not to use it, and to click the item
+  with `desktop_act` again once the cause is cleared (or `action:'invoke'` to open it). The tool
+  description, the server instructions and the guides say the same where they offer `click_element`.
+- **`desktop_discover` no longer reads the window in front when `target.hwnd` is not a window handle.**
+  An empty, zero, negative or non-numeric `target.hwnd`, sent without `windowTitle` or `tabId`, was read as
+  no target, so the discover read the foreground window and an act on its lease wrote there with
+  `ok:true`. It is now refused with `InvalidArgs` and nothing is read. With a `windowTitle` or `tabId`
+  beside it, the call still aims by that.
+- **`desktop_act` `type` / `setValue` no longer types the text a second time when a field's value write
+  fails after it has written.** Some fields write the value through UI Automation and then report the
+  write as failed. The act then typed the text again with the keyboard, and the field held it twice
+  (`abcabc`) under `ok:true`. After a failed write, the field's value is now read again. If it holds the
+  value asked for, the act answers `ok:true`. If it changed to another value, the act is refused with
+  `value_not_applied` and nothing else is typed. If it did not change or cannot be read, the act goes on
+  to the keyboard as before. This is the native UI Automation client only; the PowerShell client does
+  not read the value again. `set_element_value` gets the same read: a failed write that left the value
+  asked for now answers success.
 - **`desktop_act` `type` / `setValue` no longer writes into another field whose name contains the
   field's name.** Before, when the field had no AutomationId, the write went to the first element whose
   name *contained* the field's name, and answered `ok:true`: a write meant for "Name" could land in an

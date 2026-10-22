@@ -1,3 +1,4 @@
+import type { CollectionItemAdviceClass } from "../engine/collection-item.js";
 import {
   renderAdviceForCaller,
   ADVICE_WITHHELD_FLOOR,
@@ -637,9 +638,9 @@ const SUGGESTS: Record<string, string[]> = {
   // on the same control". Measured on a WinForms NumericUpDown: a keystroke fallback landed at the
   // inner edit's caret and produced a different wrong value.
   ValueNotApplied: [
-    "The write was accepted, but what it should have changed read back unchanged, so this act does not report it written: a control's value through UI Automation (the native client; nothing else was tried), or Word's visible page text after a type (the text may have landed out of view, or later). For a WinForms combo box, the text read back DIFFERENT from what was typed — an AutoComplete may have completed it — and the detail says what the box now holds.",
+    "The write was accepted, but what it should have changed read back unchanged, so this act does not report it written: a control's value through UI Automation (the native client; nothing else was tried), or Word's visible page text after a type (the text may have landed out of view, or later). For a WinForms combo box, the text read back DIFFERENT from what was typed — an AutoComplete may have completed it — and the detail says what the box now holds. Or the native UI Automation write FAILED after the field's value had changed to another value, so part of it may have been written; the detail says so.",
     "Do NOT retry the same act blindly. For a control: do NOT fall back to keyboard / type into the same control — on a WinForms NumericUpDown a keystroke landed at its caret and left a different wrong value ('42420' for '4242'). For Word: look at the document first (screenshot), so the text is not typed twice.",
-    "For a control, re-run desktop_discover and check the field before writing again — a control that applies a value later than that reads back unchanged; if it still holds its old value, look for the field that holds the text (a spin box or combo box can expose an inner edit). For a WinForms combo box that read back different, nothing was undone: it holds the text the detail names, and the application takes it when the focus leaves the box — set it again only if that is not the value you want.",
+    "For a control, re-run desktop_discover and check the field before writing again — a control that applies a value later than that reads back unchanged; if it still holds its old value, look for the field that holds the text (a spin box or combo box can expose an inner edit). For a WinForms combo box that read back different, nothing was undone: it holds the text the detail names, and the application takes it when the focus leaves the box — set it again only if that is not the value you want. For a write that failed after the value changed, look at this field first: it may hold part of the text.",
   ],
   WindowExcluded: [
     "This window is excluded from every tool surface of this server, by design: the key locker's own windows are excluded so a secret being typed cannot be read or driven by the same session. Nothing was done to it.",
@@ -1411,6 +1412,28 @@ const COLLECTION_ITEM_SELECT_ADVICE: readonly string[] = [
   "To open or run the item rather than select it, use desktop_act(action:'invoke')",
   "Re-run desktop_discover and act on a fresh lease — the item may have moved, changed or gone since it was read",
 ];
+
+/**
+ * internal #291 — the advice of a coordinate refusal (`AimOccluded`, `AimRouteFailed`,
+ * `AimBlockedByExcludedWindow`, `CoordinateOutsideReachableBounds`, `CursorPlacementBlocked`) when
+ * the click it stopped was on a list, tree or grid item. Their lines that send the caller to
+ * click_element are left out: its Invoke is the press a click on these items avoids (Explorer opens
+ * the file, a DataGridView cell starts editing, a .NET 10 parent node expands without selecting), and a
+ * ReadOnly cell has no Invoke at all (win2 on PR #819). A line that forbids click_element stays.
+ */
+export function collectionItemRefusalAdviceFor(code: string, adviceClass: CollectionItemAdviceClass): string[] {
+  return [
+    ...getSuggestsForCode(code).filter((line) => !SENDS_TO_CLICK_ELEMENT.test(line)),
+    COLLECTION_ITEM_NOT_CLICK_ELEMENT,
+    ...(adviceClass === "collection_item_select" ? ["To open or run the item rather than select it, use desktop_act(action:'invoke')"] : []),
+  ];
+}
+
+/** The advice lines that recommend click_element (as opposed to forbidding it). */
+const SENDS_TO_CLICK_ELEMENT = /click_element\(name=…\) (invokes|is worth)/;
+
+const COLLECTION_ITEM_NOT_CLICK_ELEMENT =
+  "This is a list, tree or grid item: do NOT use click_element on it — on these items UI Automation's Invoke opens, runs or starts editing the item (Explorer opens the file, a grid cell starts editing). Once the cause above is cleared, click it with desktop_act again";
 
 // The one line for an `executor_failed` refused before any route ran (internal #242).
 const EXECUTOR_FAILED_NO_ROUTE_TRIED =

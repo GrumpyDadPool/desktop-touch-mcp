@@ -51,8 +51,10 @@ import {
   ValueNotAppliedError,
   AIM_WINDOW_GONE,
   VALUE_NOT_APPLIED,
+  VALUE_CHANGED_THEN_FAILED,
   ELEMENT_AMBIGUOUS,
 } from "../engine/aim.js";
+import { COLLECTION_ITEM_CONTROL_TYPES } from "../engine/collection-item.js";
 import type { TargetSpec } from "../engine/world-graph/session-registry.js";
 import type { AdvertisedExecutorKind } from "../capabilities/registry.js";
 import {
@@ -2521,11 +2523,6 @@ export class NoTextRouteError extends Error implements CallerFacingRefusal {
   }
 }
 
-/**
- * internal #233 — the UIA control types a click selects rather than invokes (`selectCollectionItem`).
- * MenuItem and TabItem are not here: neither was measured, and a tab's Invoke is not a double-click.
- */
-const COLLECTION_ITEM_CONTROL_TYPES = ["ListItem", "DataItem", "TreeItem"] as const;
 
 /**
  * internal #233 — the item is clicked as a checked single mouse click instead of through UI Automation.
@@ -3185,6 +3182,18 @@ export function createDesktopExecutor(
           // either: the keyboard rung would post into the control's inner edit at its caret, which
           // win2 measured writing `42420` for `4242` (`ValueNotAppliedError` says why). Refused here,
           // before the rung, with nothing written.
+          // internal #287 — and a write that failed after the value moved to another one: the keyboard
+          // rung would type it again (win2 measured `abcabc` under `ok:true`), so it is refused here too.
+          if (uiaErr instanceof ValueNotAppliedError && (uiaErr as { uiaCode?: unknown }).uiaCode === VALUE_CHANGED_THEN_FAILED) {
+            probeRefusal("uia_set_value", "value_not_applied", aimHwnd, entity, { check: "changed_then_failed", addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
+            throw new ValueNotAppliedError(
+              `UIA SetValue for "${entity.label ?? entity.entityId}" failed after its value changed to something other than the value asked for. Not typing it another way.`,
+              { cause: uiaErr },
+              `UI Automation reported that writing "${quotedLabel(entity)}" failed, but its value had changed, to something other ` +
+              `than the value asked for, so part of it may have been written. Nothing else was tried. Look at the field, or re-run ` +
+              `desktop_discover, before writing again.`,
+            );
+          }
           if (uiaErr instanceof ValueNotAppliedError) {
             probeRefusal("uia_set_value", "value_not_applied", aimHwnd, entity, { addressedBy: addressed.addressedBy, addressedElementBy: addressed.addressedElementBy, addressedWindowBy: addressed.addressedWindowBy });
             throw new ValueNotAppliedError(
@@ -3793,6 +3802,11 @@ function getSharedRealDeps(): ExecutorDeps {
       // Internal #182 — the provider took the write and the value did not move. Typed here, where the
       // backend's code is read, so the ladder can refuse it before the keyboard rung.
       if (!r.ok && r.code === VALUE_NOT_APPLIED) throw new ValueNotAppliedError(r.error ?? "UIA SetValue changed nothing");
+      // internal #287 — the write failed after the value moved to another one. The same refusal, told
+      // apart by its code: nothing more is written, and the caller is sent to read the field.
+      if (!r.ok && r.code === VALUE_CHANGED_THEN_FAILED) {
+        throw Object.assign(new ValueNotAppliedError(r.error ?? "UIA SetValue failed after the value changed"), { uiaCode: VALUE_CHANGED_THEN_FAILED });
+      }
       // internal #289 — several elements matched exactly and the rect could not pick one. Typed here, so
       // the ladder refuses it before the keyboard rung, whose receiver would be a guess too.
       if (!r.ok && r.code === ELEMENT_AMBIGUOUS) throw Object.assign(new Error(r.error ?? "UIA value target is ambiguous"), { uiaCode: ELEMENT_AMBIGUOUS, uiaVia: r.via });
