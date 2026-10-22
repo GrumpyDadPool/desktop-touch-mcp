@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Fixed — Windows
+- **A refused click on a list, tree or grid item no longer advises `click_element`.** When such a click
+  was refused because a window covered the point, the pointer could not be placed or reached, or a
+  window this server may not act through was on top (`aim_occluded`, `cursor_placement_blocked`,
+  `coordinate_outside_reachable_bounds`, `aim_blocked_by_excluded_window`), the advice still said
+  `click_element(name=…)` would reach it. On these items its
+  UI Automation Invoke opens, runs or starts editing the item (Explorer opens the file, a grid cell
+  starts editing), and some items have none. The advice now says not to use it, and to click the item
+  with `desktop_act` again once the cause is cleared (or `action:'invoke'` to open it). The tool
+  description, the server instructions and the guides say the same where they offer `click_element`.
 - **`desktop_discover` no longer reads the window in front when `target.hwnd` is not a window handle.**
   An empty, zero, negative or non-numeric `target.hwnd`, sent without `windowTitle` or `tabId`, was read as
   no target, so the discover read the foreground window and an act on its lease wrote there with
