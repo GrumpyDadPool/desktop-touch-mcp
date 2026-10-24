@@ -385,6 +385,72 @@ export async function evaluateInTab(
   return raw.result.value;
 }
 
+/**
+ * The browser window a tab is in, in screen DIPs (internal #305).
+ *
+ * `Browser.getWindowForTarget` sent on the tab's own session answers for that tab (win2, Chrome 155
+ * and Edge 155: identical to the browser endpoint with `targetId`, 1–4 ms). win2 measured the bounds
+ * times the monitor's scale equal to the frame's GetWindowRect, which is the enumeration's region:
+ * exactly for a normal window, within 2 px for a maximized one at 150 %. The page's own
+ * screenX/outerWidth do not match a maximized window. The scale is the monitor's, not the tab's
+ * devicePixelRatio, which includes the page zoom (codex on #837).
+ *
+ * Throws when the call fails; the caller falls back to finding the window by title.
+ */
+export async function getTabWindowBounds(
+  tabId: string | null,
+  port = DEFAULT_CDP_PORT
+): Promise<{ left: number; top: number; width: number; height: number }> {
+  const tab = await resolveTab(tabId, port);
+  const session = await openSession(tab, port);
+  const win = (await session.send("Browser.getWindowForTarget", {})) as {
+    bounds?: { left?: number; top?: number; width?: number; height?: number };
+  };
+  const b = win.bounds ?? {};
+  if (typeof b.left !== "number" || typeof b.top !== "number" || typeof b.width !== "number" ||
+      typeof b.height !== "number") {
+    throw new Error("Browser.getWindowForTarget gave no usable bounds");
+  }
+  return { left: b.left, top: b.top, width: b.width, height: b.height };
+}
+
+/**
+ * The CDP browser's own process id (internal #305): `SystemInfo.getProcessInfo` on the browser
+ * endpoint (`/json/version`), the one entry of type "browser". win2 measured it equal to
+ * GetWindowThreadProcessId of every frame of that browser, and different from another browser's
+ * frames (Chrome 155 and Edge 155 open together). A tab's own session refuses the call ("only
+ * supported on the browser target"). Throws when either step fails.
+ */
+export async function getBrowserProcessId(port = DEFAULT_CDP_PORT): Promise<number> {
+  const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`CDP /json/version returned HTTP ${res.status}`);
+  const version = (await res.json()) as { webSocketDebuggerUrl?: string };
+  if (!version.webSocketDebuggerUrl) throw new Error("CDP /json/version gave no webSocketDebuggerUrl");
+  const session = await openSession(
+    { id: "__browser__", title: "", url: "", type: "browser", webSocketDebuggerUrl: version.webSocketDebuggerUrl },
+    port,
+  );
+  const info = (await session.send("SystemInfo.getProcessInfo", {})) as { processInfo?: Array<{ type?: string; id?: number }> };
+  const browser = (info.processInfo ?? []).filter((p) => p.type === "browser");
+  if (browser.length !== 1 || typeof browser[0]!.id !== "number") {
+    throw new Error("SystemInfo.getProcessInfo named no single browser process");
+  }
+  return browser[0]!.id;
+}
+
+/**
+ * Bring a tab and its window to the front with CDP `Page.bringToFront` (internal #305). win2
+ * measured it raising the tab's window to the foreground, called from a background process, over the
+ * same browser's other window and over a terminal (Chrome and Edge, maximized and overlapping), and a
+ * Chrome window over Edge, within 40 ms of the reply. It did NOT raise an Edge window over a Chrome
+ * window in front (2/2); the reply is the same either way, so callers check the foreground.
+ */
+export async function bringTabToFront(tabId: string, port = DEFAULT_CDP_PORT): Promise<void> {
+  const tab = await resolveTab(tabId, port);
+  const session = await openSession(tab, port);
+  await session.send("Page.bringToFront", {});
+}
+
 // ─── ADR-018 Phase 3 — Tier 2 wheel dispatch + observation ────────────────────
 
 /**
@@ -468,13 +534,74 @@ export async function readScrollPositionInTab(
 }
 
 /**
+ * Page-side JS that declares `zoom`, `monitorScale`, `chromeW` and `chromeH`: the viewport's offset
+ * from the window origin (window.screenX / screenY), in DIPs, and the scales to convert with. Shared
+ * by getElementScreenCoords and browser-resolver's gather so the two conversions cannot drift apart.
+ *
+ * win2 measured (internal #311, Chrome 155, zoom 90/100/125 % at display 100/150 %): screenX/screenY
+ * and outerWidth/outerHeight are DIPs, unchanged by the page zoom; innerWidth/innerHeight are zoomed
+ * css px; devicePixelRatio is the monitor's scale times the zoom. So the window origin and the insets
+ * convert at the monitor's scale, and only css px inside the viewport at devicePixelRatio. Converting
+ * all of it at devicePixelRatio, and subtracting zoomed inner sizes from DIP outer sizes, put a click
+ * +150/+209 px off at 125 %. `zoom` comes from CDP (`getPageZoom`); at 1 this is the formula as before.
+ *
+ * On Windows the outer window carries an invisible resize border on the left,
+ * right and bottom (8 px on Chrome/Edge), so outerWidth - innerWidth is both
+ * side borders and outerHeight - innerHeight is the tab strip + address bar
+ * PLUS the bottom border. The bottom border is taken to equal a side border
+ * (internal #304: counting it put every click ~8 px below the centre). On macOS
+ * there is no side border, so chromeW is 0 and nothing is taken off.
+ *
+ * A side panel (DevTools docked left/right, Chrome's side panel, Edge's
+ * sidebar) also widens outerWidth - innerWidth, and then chromeW is not a
+ * border: taking it off would aim hundreds of px up, into the tab strip. When
+ * the gap is wider than two borders can be (32 px), the bottom border is left
+ * in, as before #304. chromeW itself is then off by half the panel; that was so
+ * before #304 too.
+ */
+export function viewportOriginJs(zoom: number): string {
+  const z = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  return `  var zoom = ${z};
+  var monitorScale = (window.devicePixelRatio || 1) / zoom;
+  var innerWidthDip = window.innerWidth * zoom;
+  var innerHeightDip = window.innerHeight * zoom;
+  var chromeW = Math.round((window.outerWidth - innerWidthDip) / 2);
+  var chromeH = window.outerHeight - innerHeightDip - (window.outerWidth - innerWidthDip <= 32 ? chromeW : 0);`;
+}
+
+/**
+ * The id of the tab a null `tabId` stands for — the first page tab — so that two calls about "the
+ * tab" ask the same one. `/json/list` order is not stable between calls (win2, 2026-10-24), and the
+ * zoom read for one tab with the coordinates read for another put the click off (codex on #839).
+ */
+export async function resolveTabId(tabId: string | null, port = DEFAULT_CDP_PORT): Promise<string> {
+  return (await resolveTab(tabId, port)).id;
+}
+
+/**
+ * The tab's page zoom (internal #311), from CDP `Page.getLayoutMetrics` — `cssVisualViewport.zoom`,
+ * 1.25 at 125 %. The page cannot tell its zoom from its monitor's scale: devicePixelRatio is their
+ * product. 1 when CDP does not say, which keeps the conversion as it was before the zoom was known.
+ */
+export async function getPageZoom(tabId: string | null, port = DEFAULT_CDP_PORT): Promise<number> {
+  try {
+    const tab = await resolveTab(tabId, port);
+    const session = await openSession(tab, port);
+    const m = (await session.send("Page.getLayoutMetrics", {})) as { cssVisualViewport?: { zoom?: number } };
+    const z = m.cssVisualViewport?.zoom;
+    return typeof z === "number" && Number.isFinite(z) && z > 0 ? z : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/**
  * Get screen coordinates of a DOM element identified by a CSS selector.
  * Coordinates are in physical pixels, compatible with mouse_click.
  *
- * Coordinate formula:
- *   chromeH = outerHeight - innerHeight  (browser tab strip + address bar, in CSS px)
- *   physX   = (window.screenX + chromeW/2 + rect.left) * devicePixelRatio
- *   physY   = (window.screenY + chromeH   + rect.top)  * devicePixelRatio
+ * Coordinate formula (zoom / monitorScale / chromeW / chromeH from viewportOriginJs):
+ *   physX   = (window.screenX + chromeW) * monitorScale + rect.left * devicePixelRatio
+ *   physY   = (window.screenY + chromeH) * monitorScale + rect.top  * devicePixelRatio
  *
  * window.screenX/Y in Chrome on Windows is the outer window position in CSS pixels.
  * getBoundingClientRect() is relative to the viewport (inner content area).
@@ -487,6 +614,9 @@ export async function getElementScreenCoords(
   tabId: string | null = null,
   port = DEFAULT_CDP_PORT
 ): Promise<ElementCoords> {
+  // One tab for both reads: the zoom and the coordinates (codex on #839).
+  const tab = await resolveTabId(tabId, port);
+  const zoom = await getPageZoom(tab, port);
   const expression = `
 (function() {
   var sel = ${JSON.stringify(selector)};
@@ -501,14 +631,11 @@ export async function getElementScreenCoords(
   var dpr     = window.devicePixelRatio || 1;
   var sx      = window.screenX;
   var sy      = window.screenY;
-  // Browser chrome offsets: outerHeight-innerHeight = tab strip + address bar height in CSS px.
-  // outerWidth-innerWidth = left+right frame (usually 0 on Chrome; scrollbar is inside innerWidth).
-  var chromeH = window.outerHeight - window.innerHeight;
-  var chromeW = Math.round((window.outerWidth - window.innerWidth) / 2);
-  var physLeft   = Math.round((sx + chromeW + rect.left)            * dpr);
-  var physTop    = Math.round((sy + chromeH + rect.top)             * dpr);
-  var physRight  = Math.round((sx + chromeW + rect.right)           * dpr);
-  var physBottom = Math.round((sy + chromeH + rect.bottom)          * dpr);
+${viewportOriginJs(zoom)}
+  var physLeft   = Math.round((sx + chromeW) * monitorScale + rect.left   * dpr);
+  var physTop    = Math.round((sy + chromeH) * monitorScale + rect.top    * dpr);
+  var physRight  = Math.round((sx + chromeW) * monitorScale + rect.right  * dpr);
+  var physBottom = Math.round((sy + chromeH) * monitorScale + rect.bottom * dpr);
   return JSON.stringify({
     left:   physLeft,
     top:    physTop,
@@ -541,7 +668,7 @@ export async function getElementScreenCoords(
   });
 })()`;
 
-  const raw = (await evaluateInTab(expression, tabId, port)) as string;
+  const raw = (await evaluateInTab(expression, tab, port)) as string;
   let parsed: ({ error: string; zeroSize?: boolean } | (ElementCoords & { error?: undefined }));
   try {
     parsed = JSON.parse(raw) as typeof parsed;

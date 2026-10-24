@@ -19,6 +19,9 @@ import { resolveCandidates } from "./resolver.js";
 /** Subset of DesktopSeeInput.target; defined here to avoid circular import. */
 export type TargetSpec = { windowTitle?: string; hwnd?: string; tabId?: string };
 
+/** The largest handle `parseTargetHwnd` accepts: u64::MAX, what the native helpers can hold. */
+export const MAX_TARGET_HWND = 0xffff_ffff_ffff_ffffn;
+
 /**
  * ADR-036 — the one place that decides whether a `TargetSpec` names a window by handle.
  *
@@ -35,6 +38,12 @@ export type TargetSpec = { windowTitle?: string; hwnd?: string; tabId?: string }
  * names a real window, and refusing it would turn a call that would have worked into a silent
  * fall back to aiming by title, which is the failure this exists to remove.
  *
+ * Nothing past u64 counts either (internal #303): the native helpers read the handle with
+ * `get_u64()` and drop the lossless flag, so `2^64 + 0x1234` would wrap to `0x1234`, another
+ * window. The limit is u64 and not i64 although the UIA lane parses as i64: the native
+ * enumeration renders a handle as `h.0 as usize as u64`, so a handle sign-extended from 32 bits
+ * would arrive above i64::MAX, and whether user32 ever hands one out is not measured.
+ *
  * What each caller does with `undefined` stays that caller's decision; only the answer to "is
  * this a handle" is shared.
  */
@@ -43,7 +52,7 @@ export function parseTargetHwnd(target: TargetSpec | undefined): bigint | undefi
   if (raw === undefined || raw === "") return undefined;
   try {
     const h = BigInt(raw);
-    return h <= 0n ? undefined : h;
+    return h <= 0n || h > MAX_TARGET_HWND ? undefined : h;
   } catch {
     return undefined;
   }
@@ -313,11 +322,17 @@ export class SessionRegistry {
    * Priority: hwnd > tabId > windowTitle > default.
    * NOTE: `title:` keys are unstable — window titles can change (e.g. document rename,
    * tab title update). Prefer `hwnd` or `tabId` when available to avoid orphaned sessions.
+   *
+   * The hwnd counts only when `parseTargetHwnd` takes it (internal #310). The ingress rebuilds the
+   * providers' target from this key alone, so `window:-1` beside a title became `{hwnd:"-1"}` and
+   * the UIA lane read `@active` instead of the title the caller sent. An unusable hwnd with nothing
+   * else keeps its own key, as before; the tool refuses that call before it gets here (#831).
    */
   resolveKey(target?: TargetSpec): TargetSessionKey {
-    if (target?.hwnd)        return `window:${target.hwnd}`;
+    if (target?.hwnd && parseTargetHwnd(target) !== undefined) return `window:${target.hwnd}`;
     if (target?.tabId)       return `tab:${target.tabId}`;
     if (target?.windowTitle) return `title:${target.windowTitle}`;
+    if (target?.hwnd)        return `window:${target.hwnd}`;
     return "window:__default__";
   }
 
