@@ -346,4 +346,16 @@ describe("ADR-036 — one answer to \"is this a handle\"", () => {
     expect(parseTargetHwnd({ windowTitle: "App" })).toBeUndefined();
     expect(parseTargetHwnd(undefined)).toBeUndefined();
   });
+
+  it("refuses a value past u64, which the native helpers would wrap to another window (internal #303)", () => {
+    // u64::MAX is still a handle: a handle sign-extended from 32 bits renders above i64::MAX
+    // through the native enumeration, and refusing those is not something anyone has measured.
+    expect(parseTargetHwnd({ hwnd: "9223372036854775808" })).toBe(0x8000_0000_0000_0000n);
+    expect(parseTargetHwnd({ hwnd: "18446744071562067968" })).toBe(0xffff_ffff_8000_0000n);
+    expect(parseTargetHwnd({ hwnd: "18446744073709551615" })).toBe(0xffff_ffff_ffff_ffffn);
+    // 2^64 + 0x1234 wraps to 0x1234 through get_u64() with the lossless flag dropped.
+    for (const hwnd of ["18446744073709551616", "18446744073709556276", "0x10000000000001234"]) {
+      expect(parseTargetHwnd({ hwnd }), `hwnd = ${hwnd}`).toBeUndefined();
+    }
+  });
 });
