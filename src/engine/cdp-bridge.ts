@@ -497,10 +497,16 @@ export async function readScrollPositionInTab(
 }
 
 /**
- * Page-side JS that declares `chromeW` / `chromeH`: the viewport's offset from
- * the window origin (window.screenX / screenY), in CSS px. Shared by
- * getElementScreenCoords and browser-resolver's gather so the two conversions
- * cannot drift apart.
+ * Page-side JS that declares `zoom`, `monitorScale`, `chromeW` and `chromeH`: the viewport's offset
+ * from the window origin (window.screenX / screenY), in DIPs, and the scales to convert with. Shared
+ * by getElementScreenCoords and browser-resolver's gather so the two conversions cannot drift apart.
+ *
+ * win2 measured (internal #311, Chrome 155, zoom 90/100/125 % at display 100/150 %): screenX/screenY
+ * and outerWidth/outerHeight are DIPs, unchanged by the page zoom; innerWidth/innerHeight are zoomed
+ * css px; devicePixelRatio is the monitor's scale times the zoom. So the window origin and the insets
+ * convert at the monitor's scale, and only css px inside the viewport at devicePixelRatio. Converting
+ * all of it at devicePixelRatio, and subtracting zoomed inner sizes from DIP outer sizes, put a click
+ * +150/+209 px off at 125 %. `zoom` comes from CDP (`getPageZoom`); at 1 this is the formula as before.
  *
  * On Windows the outer window carries an invisible resize border on the left,
  * right and bottom (8 px on Chrome/Edge), so outerWidth - innerWidth is both
@@ -516,16 +522,49 @@ export async function readScrollPositionInTab(
  * in, as before #304. chromeW itself is then off by half the panel; that was so
  * before #304 too.
  */
-export const VIEWPORT_ORIGIN_JS = `  var chromeW = Math.round((window.outerWidth - window.innerWidth) / 2);
-  var chromeH = window.outerHeight - window.innerHeight - (window.outerWidth - window.innerWidth <= 32 ? chromeW : 0);`;
+export function viewportOriginJs(zoom: number): string {
+  const z = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  return `  var zoom = ${z};
+  var monitorScale = (window.devicePixelRatio || 1) / zoom;
+  var innerWidthDip = window.innerWidth * zoom;
+  var innerHeightDip = window.innerHeight * zoom;
+  var chromeW = Math.round((window.outerWidth - innerWidthDip) / 2);
+  var chromeH = window.outerHeight - innerHeightDip - (window.outerWidth - innerWidthDip <= 32 ? chromeW : 0);`;
+}
+
+/**
+ * The id of the tab a null `tabId` stands for — the first page tab — so that two calls about "the
+ * tab" ask the same one. `/json/list` order is not stable between calls (win2, 2026-10-24), and the
+ * zoom read for one tab with the coordinates read for another put the click off (codex on #839).
+ */
+export async function resolveTabId(tabId: string | null, port = DEFAULT_CDP_PORT): Promise<string> {
+  return (await resolveTab(tabId, port)).id;
+}
+
+/**
+ * The tab's page zoom (internal #311), from CDP `Page.getLayoutMetrics` — `cssVisualViewport.zoom`,
+ * 1.25 at 125 %. The page cannot tell its zoom from its monitor's scale: devicePixelRatio is their
+ * product. 1 when CDP does not say, which keeps the conversion as it was before the zoom was known.
+ */
+export async function getPageZoom(tabId: string | null, port = DEFAULT_CDP_PORT): Promise<number> {
+  try {
+    const tab = await resolveTab(tabId, port);
+    const session = await openSession(tab, port);
+    const m = (await session.send("Page.getLayoutMetrics", {})) as { cssVisualViewport?: { zoom?: number } };
+    const z = m.cssVisualViewport?.zoom;
+    return typeof z === "number" && Number.isFinite(z) && z > 0 ? z : 1;
+  } catch {
+    return 1;
+  }
+}
 
 /**
  * Get screen coordinates of a DOM element identified by a CSS selector.
  * Coordinates are in physical pixels, compatible with mouse_click.
  *
- * Coordinate formula (chromeW / chromeH from VIEWPORT_ORIGIN_JS):
- *   physX   = (window.screenX + chromeW + rect.left) * devicePixelRatio
- *   physY   = (window.screenY + chromeH + rect.top)  * devicePixelRatio
+ * Coordinate formula (zoom / monitorScale / chromeW / chromeH from viewportOriginJs):
+ *   physX   = (window.screenX + chromeW) * monitorScale + rect.left * devicePixelRatio
+ *   physY   = (window.screenY + chromeH) * monitorScale + rect.top  * devicePixelRatio
  *
  * window.screenX/Y in Chrome on Windows is the outer window position in CSS pixels.
  * getBoundingClientRect() is relative to the viewport (inner content area).
@@ -538,6 +577,9 @@ export async function getElementScreenCoords(
   tabId: string | null = null,
   port = DEFAULT_CDP_PORT
 ): Promise<ElementCoords> {
+  // One tab for both reads: the zoom and the coordinates (codex on #839).
+  const tab = await resolveTabId(tabId, port);
+  const zoom = await getPageZoom(tab, port);
   const expression = `
 (function() {
   var sel = ${JSON.stringify(selector)};
@@ -552,11 +594,11 @@ export async function getElementScreenCoords(
   var dpr     = window.devicePixelRatio || 1;
   var sx      = window.screenX;
   var sy      = window.screenY;
-${VIEWPORT_ORIGIN_JS}
-  var physLeft   = Math.round((sx + chromeW + rect.left)            * dpr);
-  var physTop    = Math.round((sy + chromeH + rect.top)             * dpr);
-  var physRight  = Math.round((sx + chromeW + rect.right)           * dpr);
-  var physBottom = Math.round((sy + chromeH + rect.bottom)          * dpr);
+${viewportOriginJs(zoom)}
+  var physLeft   = Math.round((sx + chromeW) * monitorScale + rect.left   * dpr);
+  var physTop    = Math.round((sy + chromeH) * monitorScale + rect.top    * dpr);
+  var physRight  = Math.round((sx + chromeW) * monitorScale + rect.right  * dpr);
+  var physBottom = Math.round((sy + chromeH) * monitorScale + rect.bottom * dpr);
   return JSON.stringify({
     left:   physLeft,
     top:    physTop,
@@ -589,7 +631,7 @@ ${VIEWPORT_ORIGIN_JS}
   });
 })()`;
 
-  const raw = (await evaluateInTab(expression, tabId, port)) as string;
+  const raw = (await evaluateInTab(expression, tab, port)) as string;
   let parsed: ({ error: string; zeroSize?: boolean } | (ElementCoords & { error?: undefined }));
   try {
     parsed = JSON.parse(raw) as typeof parsed;

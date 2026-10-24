@@ -15,7 +15,7 @@
  * Plan: desktop-touch-mcp-internal:docs/adr-023-phase-1-resolver-plan.md S1/S7.
  */
 
-import { evaluateInTab, VIEWPORT_ORIGIN_JS } from "../engine/cdp-bridge.js";
+import { evaluateInTab, getPageZoom, resolveTabId, viewportOriginJs } from "../engine/cdp-bridge.js";
 import { ELEMENT_NAME_JS } from "./_element-name-js.js";
 
 export interface CandidateCollectionArgs {
@@ -47,6 +47,8 @@ export interface ActionFactsArgs {
    * actionable target, not the matched leaf.
    */
   role?: string;
+  /** The tab's page zoom (`getPageZoom`, internal #311); 1 when omitted. */
+  pageZoom?: number;
   /**
    * ADR-023 Phase 2b: when true, the gather ALSO embeds page-level `ModalFacts`
    * (for `detectModal`) + a per-candidate `occludedByDialogIndex` (which modal
@@ -381,7 +383,7 @@ ${occluderIndexHelperJs()}`
   const dpr = window.devicePixelRatio || 1;
   const sx = window.screenX;
   const sy = window.screenY;
-${VIEWPORT_ORIGIN_JS}
+${viewportOriginJs(args.pageZoom ?? 1)}
 
   function actNode(el) {
     const cs2 = window.getComputedStyle(el);
@@ -499,7 +501,7 @@ ${VIEWPORT_ORIGIN_JS}
   return {
     total: pool.length,
     returned: factsList.length,
-    viewport: { screenX: sx, screenY: sy, dpr: dpr, chromeH: chromeH, chromeW: chromeW, innerWidth: window.innerWidth, innerHeight: window.innerHeight },
+    viewport: { screenX: sx, screenY: sy, dpr: dpr, monitorScale: monitorScale, chromeH: chromeH, chromeW: chromeW, innerWidth: window.innerWidth, innerHeight: window.innerHeight },
     candidates: factsList,${modalReturn}
   };
 })()
@@ -709,9 +711,15 @@ export interface ViewportMetrics {
   screenX: number;
   screenY: number;
   dpr: number;
-  /** viewport top below screenY: tab strip + address bar (VIEWPORT_ORIGIN_JS) */
+  /**
+   * The monitor's scale: dpr without the page zoom (viewportOriginJs, internal #311). screenX/Y and
+   * the chrome insets are DIPs and convert at this; css px inside the viewport convert at dpr.
+   * Absent from a gather built before it existed; then dpr stands in, as before.
+   */
+  monitorScale?: number;
+  /** viewport top below screenY, in DIPs: tab strip + address bar (viewportOriginJs) */
   chromeH: number;
-  /** viewport left beyond screenX: the left frame (VIEWPORT_ORIGIN_JS) */
+  /** viewport left beyond screenX, in DIPs: the left frame (viewportOriginJs) */
   chromeW: number;
   innerWidth: number;
   innerHeight: number;
@@ -1019,9 +1027,10 @@ export type ResolveActionOutcome =
 export function physicalPoint(rect: RectXYWH, vp: ViewportMetrics): { x: number; y: number } {
   const cx = rect.x + rect.w / 2;
   const cy = rect.y + rect.h / 2;
+  const scale = vp.monitorScale ?? vp.dpr;
   return {
-    x: Math.round((vp.screenX + vp.chromeW + cx) * vp.dpr),
-    y: Math.round((vp.screenY + vp.chromeH + cy) * vp.dpr),
+    x: Math.round((vp.screenX + vp.chromeW) * scale + cx * vp.dpr),
+    y: Math.round((vp.screenY + vp.chromeH) * scale + cy * vp.dpr),
   };
 }
 
@@ -1033,7 +1042,19 @@ export function physicalPoint(rect: RectXYWH, vp: ViewportMetrics): { x: number;
  * (`src/engine/perception/action-target.ts`) — different layer, different shape.
  */
 export async function resolveBrowserActionTarget(args: ResolveActionArgs): Promise<ResolveActionOutcome> {
+  // One tab for the zoom and the gather (codex on #839). When the listing cannot be read, the gather
+  // below reports that as before.
+  let tab: string | null = args.tabId ?? null;
+  if (tab === null) {
+    try {
+      tab = await resolveTabId(null, args.port);
+    } catch {
+      // leave it null
+    }
+  }
+  const pageZoom = await getPageZoom(tab, args.port);
   const expr = buildActionCandidateFactsJs({
+    pageZoom,
     by: args.by,
     pattern: args.pattern,
     scope: args.scope,
@@ -1045,7 +1066,7 @@ export async function resolveBrowserActionTarget(args: ResolveActionArgs): Promi
   });
   let raw: unknown;
   try {
-    raw = await evaluateInTab(expr, args.tabId ?? null, args.port);
+    raw = await evaluateInTab(expr, tab, args.port);
   } catch (err) {
     // The injected JS can throw synchronously OUT of the IIFE for inputs the
     // shared body does not guard — an invalid CSS `scope`/`by:'selector'` makes
