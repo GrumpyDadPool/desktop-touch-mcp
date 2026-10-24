@@ -468,13 +468,35 @@ export async function readScrollPositionInTab(
 }
 
 /**
+ * Page-side JS that declares `chromeW` / `chromeH`: the viewport's offset from
+ * the window origin (window.screenX / screenY), in CSS px. Shared by
+ * getElementScreenCoords and browser-resolver's gather so the two conversions
+ * cannot drift apart.
+ *
+ * On Windows the outer window carries an invisible resize border on the left,
+ * right and bottom (8 px on Chrome/Edge), so outerWidth - innerWidth is both
+ * side borders and outerHeight - innerHeight is the tab strip + address bar
+ * PLUS the bottom border. The bottom border is taken to equal a side border
+ * (internal #304: counting it put every click ~8 px below the centre). On macOS
+ * there is no side border, so chromeW is 0 and nothing is taken off.
+ *
+ * A side panel (DevTools docked left/right, Chrome's side panel, Edge's
+ * sidebar) also widens outerWidth - innerWidth, and then chromeW is not a
+ * border: taking it off would aim hundreds of px up, into the tab strip. When
+ * the gap is wider than two borders can be (32 px), the bottom border is left
+ * in, as before #304. chromeW itself is then off by half the panel; that was so
+ * before #304 too.
+ */
+export const VIEWPORT_ORIGIN_JS = `  var chromeW = Math.round((window.outerWidth - window.innerWidth) / 2);
+  var chromeH = window.outerHeight - window.innerHeight - (window.outerWidth - window.innerWidth <= 32 ? chromeW : 0);`;
+
+/**
  * Get screen coordinates of a DOM element identified by a CSS selector.
  * Coordinates are in physical pixels, compatible with mouse_click.
  *
- * Coordinate formula:
- *   chromeH = outerHeight - innerHeight  (browser tab strip + address bar, in CSS px)
- *   physX   = (window.screenX + chromeW/2 + rect.left) * devicePixelRatio
- *   physY   = (window.screenY + chromeH   + rect.top)  * devicePixelRatio
+ * Coordinate formula (chromeW / chromeH from VIEWPORT_ORIGIN_JS):
+ *   physX   = (window.screenX + chromeW + rect.left) * devicePixelRatio
+ *   physY   = (window.screenY + chromeH + rect.top)  * devicePixelRatio
  *
  * window.screenX/Y in Chrome on Windows is the outer window position in CSS pixels.
  * getBoundingClientRect() is relative to the viewport (inner content area).
@@ -501,10 +523,7 @@ export async function getElementScreenCoords(
   var dpr     = window.devicePixelRatio || 1;
   var sx      = window.screenX;
   var sy      = window.screenY;
-  // Browser chrome offsets: outerHeight-innerHeight = tab strip + address bar height in CSS px.
-  // outerWidth-innerWidth = left+right frame (usually 0 on Chrome; scrollbar is inside innerWidth).
-  var chromeH = window.outerHeight - window.innerHeight;
-  var chromeW = Math.round((window.outerWidth - window.innerWidth) / 2);
+${VIEWPORT_ORIGIN_JS}
   var physLeft   = Math.round((sx + chromeW + rect.left)            * dpr);
   var physTop    = Math.round((sy + chromeH + rect.top)             * dpr);
   var physRight  = Math.round((sx + chromeW + rect.right)           * dpr);
