@@ -227,6 +227,23 @@ Record every narrowing here so the exceptions stay visible:
     under the real Dell EAWorkWindow overlay. #819 on an Explorer row: click selects, invoke opens.
   - No P1, no regression. P3s: `server_status` has no version field; the value route row still says
     `addressedElementBy:"name_substring"` for a write that found the field by exact name and rect.
+- **v2.3.3 (2026-10-26)** — narrowed to the launcher, by the user's decision. The diff since 2.3.2 is confined to
+  `bin/launcher.js` (#849, release-cache pruning): `git diff v2.3.2 v2.3.3 -- src/` is empty, so every tool runs the
+  2.3.2 runtime. The launcher change itself ran on win2's machine on #849 (W1–W4 and a control: a release held by a
+  running process refused the rename with EBUSY and stayed intact; prune ~2.2 s after spawn, not blocking
+  initialize; download-* by pid; running/ marks). Planned for this release: before the tag, a build of the release
+  head with HTTP 6/6 reporting 2.3.3 and npx from the packed tarball stopping at the PENDING manifest; after
+  publish, a real `npx` of 2.3.3 on Windows (win2) and macOS (mac), with the old releases in the cache cleaned up.
+  Results:
+  - Pre-tag (win2, 19af51a7, the CI addon of 2.3.2): HTTP 6/6 with `version: 2.3.3`, 32 tools; `publish --dry-run`
+    5 files; npx from the packed tarball stopped at the PENDING manifest (and at the 404 for the missing tag with
+    ALLOW_UNVERIFIED=1, exit 1, not 127).
+  - Post-publish, macOS (mac, real cache): v2.3.0 and v2.3.2 before; installed v2.3.3, removed v2.3.0, kept v2.3.2.
+  - Post-publish, Windows (win2, real cache): 50 versions v0.15.5…v2.3.2 plus `dev-local`, 6.68 GB, with three
+    servers running from v2.3.1 (started by pre-#848 launchers, so no running/ marks). Installed v2.3.3 in 109 s;
+    v2.3.1 refused the rename (EBUSY) and was kept; initialize answered at 110 s; the prune removed 48 releases in
+    about 87 s after the spawn while the server answered; `dev-local`, v2.3.1, v2.3.2, v2.3.3 remained (0.72 GB);
+    both legacy download-* folders were removed; no .trash-* left; the v2.3.1 servers kept running untouched.
 
 ### HTTP Transport Verification (Required)
 
