@@ -21,14 +21,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::safety::napi_safe_call;
 use super::types::{NativeForceFocusResult, NativeThreadFocus};
 
-/// Reinterpret a JS BigInt as an HWND. `get_u64` (magnitude) is correct for an
-/// HWND handle value; the signed `get_i64` is only needed for WPARAM/LPARAM
-/// payloads (see `win32_post_message`). Shared with `console_paste` so the HWND
-/// conversion lives in one place (PR #393 R1 P3-1).
-pub(crate) fn hwnd_from_bigint(b: BigInt) -> HWND {
-    let (_sign, val, _lossless) = b.get_u64();
-    HWND(val as isize as *mut std::ffi::c_void)
-}
+/// The HWND reading (`handle.rs`, internal #303), re-exported for `console_paste`. The signed
+/// `get_i64` is only for WPARAM/LPARAM payloads (see `win32_post_message`).
+pub(crate) use super::handle::hwnd_from_bigint;
 
 fn hwnd_to_bigint(h: HWND) -> BigInt {
     BigInt::from(h.0 as usize as u64)
@@ -64,6 +59,16 @@ pub fn win32_force_set_foreground_window(
         let target = hwnd_from_bigint(hwnd);
 
         let fg_before = unsafe { GetForegroundWindow() };
+        // internal #303 — no window to focus. Checked first: with no foreground window (lock screen,
+        // UAC) the "already in the foreground?" test below would match NULL and answer ok.
+        if super::handle::refused_or_null(target) {
+            return Ok(NativeForceFocusResult {
+                ok: false,
+                attached: false,
+                fg_before: hwnd_to_bigint(fg_before),
+                fg_after: hwnd_to_bigint(fg_before),
+            });
+        }
         // Already in the foreground? Skip the attach dance.
         if fg_before.0 == target.0 {
             return Ok(NativeForceFocusResult {
@@ -192,6 +197,11 @@ pub fn win32_get_focused_child_hwnd(
 /// Rust — it is an N-API boundary wrapper — so the shared logic lives here.
 /// Returns whether `PostMessageW` succeeded.
 pub(crate) fn post_message(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: LPARAM) -> bool {
+    // internal #303 — PostMessageW(NULL) posts to this thread's own queue and succeeds. Checked here, so
+    // every caller (win32_post_message, console paste) is covered, not only the entries that remember.
+    if super::handle::refused_or_null(hwnd) {
+        return false;
+    }
     let result = unsafe { PostMessageW(Some(hwnd), msg, w_param, l_param) };
     result.is_ok()
 }
