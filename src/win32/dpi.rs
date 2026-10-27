@@ -14,7 +14,7 @@
 
 use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
-use windows::Win32::Foundation::{E_ACCESSDENIED, HWND};
+use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwareness, MDT_EFFECTIVE_DPI, PROCESS_DPI_AWARENESS,
@@ -22,10 +22,7 @@ use windows::Win32::UI::HiDpi::{
 
 use super::safety::napi_safe_call;
 
-fn hwnd_from_bigint(b: BigInt) -> HWND {
-    let (_sign, val, _lossless) = b.get_u64();
-    HWND(val as isize as *mut std::ffi::c_void)
-}
+use super::handle::hwnd_from_bigint;
 
 /// Effective DPI of the monitor containing `hwnd`. Returns 96 (= 100%
 /// baseline) on any failure to match the legacy `getWindowDpi` behavior.
@@ -33,6 +30,10 @@ fn hwnd_from_bigint(b: BigInt) -> HWND {
 pub fn win32_get_window_dpi(hwnd: BigInt) -> napi::Result<u32> {
     napi_safe_call("win32_get_window_dpi", || {
         let h = hwnd_from_bigint(hwnd);
+        // internal #303 — no window, no monitor: the documented 96, not whatever NULL resolves to.
+        if super::handle::refused_or_null(h) {
+            return Ok(96);
+        }
         // MonitorFromWindow always returns a valid HMONITOR for any non-null
         // window (including DEFAULTTONEAREST fallback). For null/dead hwnd
         // it returns NULL; treat as 96.

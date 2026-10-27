@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed — Windows
+- **A window handle past 64 bits no longer reaches another window.** The native helpers read a handle
+  from JavaScript as its low 64 bits, so `18446744073709556276` (2^64 + 0x1234) acted on window
+  `0x1234`; on Windows, `scroll` with 2^64 plus a real window's handle scrolled that window. The tools
+  that take `hwnd` (`screenshot`, `get_ui_elements`, `scroll`, `keyboard`, the input pipeline and
+  `desktop_discover`) now refuse a value that names no window — zero, negative, past 64 bits, or a
+  pseudo-handle such as `HWND_BROADCAST` — as `WindowNotFound` (internal #303). The native helpers read
+  such a value as no window, and posting a message, pasting into a console, the IME and focusing now
+  fail for it instead of acting on the server's own thread.
+- **`desktop_discover` names a frozen window as frozen when UI Automation cannot read it.** A hidden
+  packaged app that Windows has suspended (Settings, for one) answered `entityZeroReason:
+  "window_frozen"` when targeted by its handle, but `all_providers_failed` by its title. That told the
+  caller to change providers, when the window's app was not running. When UI Automation fails on the
+  target, discover now asks whether it is a hidden, frozen window, and answers `window_frozen` if so
+  (internal #288). This covers the pinned handle, or the windows the title names when all of them are
+  hidden. Nothing is captured; a title that also names a window on screen keeps the old answer.
+
 ## [2.3.3] - 2026-10-26 — The launcher cleans up old releases
 
 Thanks to @yan-vision for reporting #848, with the measurements and the safety constraints the fix follows.

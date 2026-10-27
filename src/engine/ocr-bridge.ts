@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import sharp from "sharp";
 import { captureWindowBackground, capturedFrameRect } from "./image.js";
-import { enumWindowsInZOrder, getWindowDpi, printWindowToBuffer, isExcludedWindowHandle } from "./win32.js";
+import { enumWindowsInZOrder, getWindowDpi, printWindowToBuffer, isExcludedWindowHandle, type WindowZInfo } from "./win32.js";
 import { WindowExcludedError } from "./tool-exclusion.js";
 import { refuseIfFrozen } from "./window-frozen.js";
 import { nativeEngine } from "./native-engine.js";
@@ -681,6 +681,17 @@ export function clusterOcrWords(words: OcrWord[], elementGapThreshold = 35): Som
 }
 
 /**
+ * The windows a title names, by the OCR lane's rule: plain case-insensitive substring, in Z-order.
+ * The first of them is the one the OCR lane reads (ADR-029: this find is the authority on which window
+ * a visual-only entity came from); discover's frozen test when UIA could not read the target looks at
+ * all of them (internal #288).
+ */
+export function findOcrWindowsByTitle(windowTitle: string): WindowZInfo[] {
+  const wanted = windowTitle.toLowerCase();
+  return enumWindowsInZOrder().filter((w) => w.title.toLowerCase().includes(wanted));
+}
+
+/**
  * Full UIA-Blind SoM pipeline for a single window.
  *
  * Steps:
@@ -750,8 +761,7 @@ export async function runSomPipeline(
     // came from — plain case-insensitive substring, first hit in Z-order. The
     // resolved handle is returned so consumers can record it as the entity's
     // origin instead of re-running this search at act time.
-    const wins = enumWindowsInZOrder();
-    const win  = wins.find((w) => w.title.toLowerCase().includes(windowTitle.toLowerCase()));
+    const win = findOcrWindowsByTitle(windowTitle)[0];
     if (!win) throw new Error(`runSomPipeline: window not found: "${windowTitle}"`);
     targetHwnd = win.hwnd;
     origin = { x: win.region.x, y: win.region.y };

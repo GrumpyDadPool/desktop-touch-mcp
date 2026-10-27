@@ -16,7 +16,7 @@
 
 use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
 use windows::Win32::UI::WindowsAndMessaging::{SMTO_ABORTIFHUNG, SendMessageTimeoutW, SendMessageW};
 
@@ -34,10 +34,7 @@ const IMC_GETOPENSTATUS: usize = 0x0005;
 const IME_READ_TIMEOUT_MS: u32 = 200;
 const IMC_SETOPENSTATUS: usize = 0x0006;
 
-fn hwnd_from_bigint(b: BigInt) -> HWND {
-    let (_sign, val, _lossless) = b.get_u64();
-    HWND(val as isize as *mut std::ffi::c_void)
-}
+use super::handle::hwnd_from_bigint;
 
 /// Query whether the target window's IME is currently open (composition ON).
 ///
@@ -48,6 +45,10 @@ fn hwnd_from_bigint(b: BigInt) -> HWND {
 pub fn win32_get_ime_open_status(hwnd: BigInt) -> napi::Result<bool> {
     napi_safe_call("win32_get_ime_open_status", || {
         let target = hwnd_from_bigint(hwnd);
+        // internal #303 — ImmGetDefaultIMEWnd(NULL) answers this thread's own IME window.
+        if super::handle::refused_or_null(target) {
+            return Ok(false);
+        }
         let ime_wnd = unsafe { ImmGetDefaultIMEWnd(target) };
         if ime_wnd.0.is_null() {
             return Ok(false);
@@ -77,6 +78,10 @@ pub fn win32_get_ime_open_status(hwnd: BigInt) -> napi::Result<bool> {
 pub fn win32_set_ime_open_status(hwnd: BigInt, open: bool) -> napi::Result<bool> {
     napi_safe_call("win32_set_ime_open_status", || {
         let target = hwnd_from_bigint(hwnd);
+        // internal #303 — ImmGetDefaultIMEWnd(NULL) answers this thread's own IME window.
+        if super::handle::refused_or_null(target) {
+            return Ok(false);
+        }
         let ime_wnd = unsafe { ImmGetDefaultIMEWnd(target) };
         if ime_wnd.0.is_null() {
             return Ok(false);

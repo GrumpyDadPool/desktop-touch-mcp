@@ -161,6 +161,11 @@ pub fn win32_console_paste_no_focus(
 ) -> napi::Result<ConsolePasteResult> {
     napi_safe_call("win32_console_paste_no_focus", || {
         let target = hwnd_from_bigint(hwnd);
+        // internal #303 — before the clipboard is touched: the paste is posted to `target`, and a post to
+        // NULL reaches this thread and succeeds.
+        if super::handle::refused_or_null(target) {
+            return Ok(fail("not_a_window", Vec::new(), false));
+        }
         let crlf = normalise_crlf(&text);
 
         // The whole clipboard transaction runs under one hidden owner window

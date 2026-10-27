@@ -25,17 +25,9 @@ use super::types::{NativeThreadProcessId, NativeWin32Rect, NativeWindowAtPoint};
 
 // ─── HWND ↔ BigInt conversion helpers ────────────────────────────────────────
 
-/// Reinterpret the low 64 bits of a JS `bigint` as an `HWND`. The sign-bit
-/// from napi's `get_u64` (returns `(sign, value, lossless)`) is intentionally
-/// dropped — `value` already holds the low 64 bits we want, and `as isize`
-/// preserves the bit pattern on x64 Windows. (The output side
-/// `hwnd_to_bigint` always emits a positive bigint, so JS round-trips of
-/// HWNDs read from this addon never go negative; we accept negative input
-/// only as a defensive concession to other callers.)
-fn hwnd_from_bigint(b: BigInt) -> HWND {
-    let (_sign, val, _lossless) = b.get_u64();
-    HWND(val as isize as *mut std::ffi::c_void)
-}
+/// The HWND reading is `handle.rs` (internal #303): a value that names no window reads as the null
+/// HWND, so these getters answer "" / null / false for it, as for a handle that is gone.
+use super::handle::hwnd_from_bigint;
 
 /// Emit an `HWND` as a positive `BigInt` (always non-negative) by routing
 /// through `usize → u64`. JS-side `bigint` is therefore always >= 0n.
